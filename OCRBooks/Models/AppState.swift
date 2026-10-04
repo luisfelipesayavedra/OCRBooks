@@ -2,6 +2,7 @@ import SwiftUI
 import PDFKit
 import CoreGraphics
 import UniformTypeIdentifiers
+import CryptoKit
 
 /// Estado central de la aplicación. Orquesta el flujo completo:
 /// abrir PDF → procesar página por página → exportar PDF restaurado con OCR.
@@ -9,7 +10,11 @@ import UniformTypeIdentifiers
 final class AppState: ObservableObject {
 
     @Published var pages: [PageItem] = []
-    @Published var selection: Int?
+    @Published var selection: Int? {
+        didSet {
+            if oldValue != selection { ensurePreviewsForSelection() }
+        }
+    }
     @Published var settings = RestorationSettings()
     @Published var isWorking = false
     @Published var progress: Double = 0
@@ -27,7 +32,9 @@ final class AppState: ObservableObject {
 
     private var pdf: PDFDocument?
     private var cacheDir: URL?
+    private var manifestURL: URL?
     private var batchTask: Task<Void, Never>?
+    private var sleepActivity: NSObjectProtocol?
 
     init() {
         // Si el modelo de IA ya está compilado en disco, cargarlo sin red.
@@ -97,18 +104,136 @@ final class AppState: ObservableObject {
         progress = 0
         progressLabel = ""
 
-        // Caché en disco para las páginas restauradas a resolución completa.
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        let dir = base
-            .appendingPathComponent("OCRBooks", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Almacenamiento PERMANENTE por documento (Application Support, nunca
+        // Caches: macOS puede purgar Caches y arruinaría semanas de trabajo).
+        // El identificador es estable (ruta + tamaño + páginas), así que al
+        // reabrir el mismo PDF se reanuda exactamente donde quedó.
+        let dir = Self.documentStorageDirectory(for: url, pageCount: document.pageCount)
         cacheDir = dir
+        manifestURL = dir.appendingPathComponent("manifest.json")
 
         pages = (0..<document.pageCount).map { PageItem(id: $0) }
+        restoreFromManifest()
         selection = pages.isEmpty ? nil : 0
+        ensurePreviewsForSelection()
         loadThumbnails()
+    }
+
+    static func documentStorageDirectory(for url: URL, pageCount: Int) -> URL {
+        let base = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attributes?[.size] as? Int) ?? 0
+        let key = "\(url.path)|\(size)|\(pageCount)"
+        let digest = SHA256.hash(data: Data(key.utf8))
+        let id = digest.map { String(format: "%02x", $0) }.joined().prefix(16)
+        let dir = base.appendingPathComponent("OCRBooks/Documentos/\(id)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    // MARK: - Persistencia y reanudación
+
+    /// Restaura el estado guardado: las páginas ya restauradas se marcan como
+    /// hechas y apuntan a sus PNG/.vec en disco. Las vistas previas se
+    /// regeneran bajo demanda al seleccionar cada página.
+    private func restoreFromManifest() {
+        guard let manifestURL, let cacheDir,
+              let manifest = DocumentManifest.load(from: manifestURL),
+              manifest.pageCount == pages.count else { return }
+
+        for record in manifest.pages where pages.indices.contains(record.index) {
+            let png = cacheDir.appendingPathComponent(String(format: "page-%04d.png", record.index))
+            guard record.done, FileManager.default.fileExists(atPath: png.path) else { continue }
+            pages[record.index].status = .done
+            pages[record.index].enhancedURL = png
+            pages[record.index].lines = record.lines
+            pages[record.index].skewAngle = record.skewAngle
+            pages[record.index].renderDPI = record.renderDPI
+            pages[record.index].inkColor = record.inkColor
+            pages[record.index].strokes = record.strokes
+            pages[record.index].editVersion = record.editVersion
+            if record.hasContours {
+                let vec = cacheDir.appendingPathComponent(String(format: "page-%04d.vec", record.index))
+                if FileManager.default.fileExists(atPath: vec.path) {
+                    pages[record.index].contoursURL = vec
+                }
+            }
+        }
+    }
+
+    /// Guarda el manifiesto (atómico, en segundo plano). Se llama tras cada
+    /// página completada y tras cada edición del borrador.
+    func saveManifest() {
+        guard let manifestURL, let documentURL else { return }
+        let records = pages.map { page in
+            PageRecord(
+                index: page.id,
+                done: page.status == .done,
+                skewAngle: page.skewAngle,
+                renderDPI: page.renderDPI,
+                lines: page.lines,
+                inkColor: page.inkColor,
+                strokes: page.strokes,
+                hasContours: page.contoursURL != nil,
+                editVersion: page.editVersion
+            )
+        }
+        let manifest = DocumentManifest(
+            pdfPath: documentURL.path,
+            pageCount: pages.count,
+            pages: records
+        )
+        Task.detached(priority: .utility) {
+            manifest.save(to: manifestURL)
+        }
+    }
+
+    /// Regenera bajo demanda las vistas previas de la página seleccionada
+    /// (tras reanudar una sesión, los PNG están en disco pero no en memoria).
+    private func ensurePreviewsForSelection() {
+        guard let index = selection, pages.indices.contains(index),
+              pages[index].status == .done else { return }
+
+        if pages[index].enhancedPreview == nil, let url = pages[index].enhancedURL {
+            Task.detached(priority: .userInitiated) { [weak self] in
+                guard let full = ImageUtil.readImage(from: url) else { return }
+                let preview = ImageUtil.scaled(full, maxDimension: 1800)
+                await MainActor.run {
+                    guard let self, self.pages.indices.contains(index) else { return }
+                    self.pages[index].enhancedPreview = preview
+                }
+            }
+        }
+        if pages[index].originalPreview == nil, let pdfPage = page(at: index) {
+            Task.detached(priority: .utility) { [weak self] in
+                guard let rendered = try? PDFRenderer.render(page: pdfPage, dpi: 200) else { return }
+                let preview = ImageUtil.scaled(rendered, maxDimension: 1800)
+                await MainActor.run {
+                    guard let self, self.pages.indices.contains(index) else { return }
+                    self.pages[index].originalPreview = preview
+                }
+            }
+        }
+    }
+
+    // MARK: - Anti-reposo
+
+    /// Durante un lote largo el Mac no debe dormirse por inactividad.
+    private func beginSleepPrevention() {
+        guard sleepActivity == nil else { return }
+        sleepActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: "Restaurando el libro página por página"
+        )
+    }
+
+    private func endSleepPrevention() {
+        if let sleepActivity {
+            ProcessInfo.processInfo.endActivity(sleepActivity)
+        }
+        sleepActivity = nil
     }
 
     private func loadThumbnails() {
@@ -142,31 +267,59 @@ final class AppState: ObservableObject {
         guard !isWorking else { return }
         isWorking = true
         progress = 0
+        beginSleepPrevention()
         batchTask = Task { [weak self] in
             guard let self else { return }
             let total = await self.pages.count
+            var durations: [TimeInterval] = []
             for index in 0..<total {
                 if Task.isCancelled { break }
                 let alreadyDone = await MainActor.run { self.pages[index].status == .done }
                 if !alreadyDone {
+                    let started = Date()
                     await self.processPage(index)
+                    durations.append(Date().timeIntervalSince(started))
                 }
                 await MainActor.run {
                     self.progress = Double(index + 1) / Double(total)
-                    self.progressLabel = "Página \(index + 1) de \(total)"
+                    self.progressLabel = Self.batchLabel(
+                        current: index + 1, total: total, durations: durations
+                    )
                 }
             }
             await MainActor.run {
                 self.isWorking = false
                 self.progressLabel = ""
+                self.endSleepPrevention()
             }
         }
+    }
+
+    /// "Página 112 de 934 · ~28 min/pág · quedan ≈ 15d 8h"
+    private static func batchLabel(current: Int, total: Int, durations: [TimeInterval]) -> String {
+        var label = "Página \(current) de \(total)"
+        // Media móvil de las últimas páginas realmente procesadas.
+        let recent = durations.suffix(10)
+        guard !recent.isEmpty else { return label }
+        let avg = recent.reduce(0, +) / Double(recent.count)
+        let remaining = avg * Double(total - current)
+        label += " · ~\(shortDuration(avg))/pág · quedan ≈ \(shortDuration(remaining))"
+        return label
+    }
+
+    private static func shortDuration(_ seconds: TimeInterval) -> String {
+        let s = Int(seconds)
+        if s >= 86400 { return "\(s / 86400)d \((s % 86400) / 3600)h" }
+        if s >= 3600 { return "\(s / 3600)h \((s % 3600) / 60)m" }
+        if s >= 60 { return "\(s / 60) min" }
+        return "\(s) s"
     }
 
     func cancelBatch() {
         batchTask?.cancel()
         isWorking = false
         progressLabel = ""
+        endSleepPrevention()
     }
 
     /// Procesa una página completa: render a DPI alto → deskew → restauración
@@ -277,6 +430,7 @@ final class AppState: ObservableObject {
             pages[index].inkColor = processed.inkColor
             pages[index].renderDPI = processed.renderDPI
             pages[index].status = .done
+            saveManifest() // reanudable: el progreso queda en disco al instante
         case .failure(let error):
             pages[index].status = .failed(error.localizedDescription)
         }
@@ -307,16 +461,19 @@ final class AppState: ObservableObject {
     func addStroke(_ stroke: EraserStroke, at index: Int) {
         guard pages.indices.contains(index) else { return }
         pages[index].strokes.append(stroke)
+        saveManifest()
     }
 
     func undoStroke(at index: Int) {
         guard pages.indices.contains(index), !pages[index].strokes.isEmpty else { return }
         pages[index].strokes.removeLast()
+        saveManifest()
     }
 
     func clearStrokes(at index: Int) {
         guard pages.indices.contains(index) else { return }
         pages[index].strokes.removeAll()
+        saveManifest()
     }
 
     /// Borrador en modo "Reconstruir": rellena la zona del trazo con el papel
@@ -344,6 +501,7 @@ final class AppState: ObservableObject {
         if let preview {
             pages[index].enhancedPreview = preview
             pages[index].editVersion += 1 // fuerza la recarga del editor
+            saveManifest()
         } else {
             errorMessage = "No se pudo reconstruir esa zona (inpainting)."
         }
@@ -368,6 +526,7 @@ final class AppState: ObservableObject {
         guard !isWorking else { return }
         isWorking = true
         progress = 0
+        beginSleepPrevention()
         batchTask = Task { [weak self] in
             guard let self else { return }
 
@@ -385,7 +544,11 @@ final class AppState: ObservableObject {
                 }
             }
             if Task.isCancelled {
-                await MainActor.run { self.isWorking = false; self.progressLabel = "" }
+                await MainActor.run {
+                    self.isWorking = false
+                    self.progressLabel = ""
+                    self.endSleepPrevention()
+                }
                 return
             }
 
@@ -415,12 +578,14 @@ final class AppState: ObservableObject {
                     self.progress = 1
                     self.progressLabel = "Exportado: \(url.lastPathComponent)"
                     self.isWorking = false
+                    self.endSleepPrevention()
                 }
             } catch {
                 await MainActor.run {
                     self.errorMessage = error.localizedDescription
                     self.isWorking = false
                     self.progressLabel = ""
+                    self.endSleepPrevention()
                 }
             }
         }
