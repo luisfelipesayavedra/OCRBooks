@@ -104,8 +104,8 @@ struct SettingsPanel: View {
                     }
                 }
                 if state.settings.strength != .light {
-                    Toggle("Recomposición vectorial de la tinta", isOn: $state.settings.vectorizeText)
-                        .help("Traza el contorno real de cada letra como curvas Bézier y las incrusta en el PDF: texto perfectamente nítido a cualquier zoom, conservando la tipografía original. Las ilustraciones permanecen en ráster.")
+                    Toggle("Letras vectoriales sin píxeles (alisado)", isOn: $state.settings.vectorizeText)
+                        .help("Traza el contorno real de cada letra como curvas Bézier y la rellena con antialiasing: cero dentado de píxel en pantalla, en el PDF y al imprimir, conservando la tipografía original. Las ilustraciones permanecen en ráster.")
                 }
             }
 

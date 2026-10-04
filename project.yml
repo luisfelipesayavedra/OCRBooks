@@ -44,3 +44,10 @@ targets:
         SWIFT_VERSION: "5.9"
         ENABLE_HARDENED_RUNTIME: true
         CODE_SIGN_STYLE: Automatic
+      configs:
+        # El motor procesa decenas de millones de píxeles en Swift puro:
+        # sin -O, una página tarda 10-50x más. Optimizar también en Debug.
+        debug:
+          SWIFT_OPTIMIZATION_LEVEL: "-O"
+          SWIFT_COMPILATION_MODE: wholemodule
+          ONLY_ACTIVE_ARCH: true

@@ -354,10 +354,14 @@ enum DeepRestorer {
     /// Escribe el resultado sobre el contexto: papel blanco puro y tinta con
     /// la densidad pedida. En gris/color la tinta conserva los valores del
     /// trazo original (gamma aplicada); en blanco y negro es tinta pura.
+    /// Los píxeles marcados en `excludeMask` se pintan como papel: son los
+    /// glifos que después se rellenan como vectores suaves (antialiasing),
+    /// así el ráster dentado no asoma bajo la curva.
     static func compose(
         in ctx: CGContext,
         gray: [Float],
         mask: [UInt8],
+        excludeMask: [UInt8]? = nil,
         mode: OutputMode,
         inkGamma: Double
     ) {
@@ -371,7 +375,8 @@ enum DeepRestorer {
             let grow = y * w
             for x in 0..<w {
                 let o = row + x * 4
-                if mask[grow + x] == 0 {
+                let i = grow + x
+                if mask[i] == 0 || (excludeMask?[i] ?? 0) == 1 {
                     px[o] = 255; px[o + 1] = 255; px[o + 2] = 255
                 } else {
                     switch mode {

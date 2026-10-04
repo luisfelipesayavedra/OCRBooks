@@ -160,18 +160,20 @@ enum RestorationEngine {
         // glifos (antes de dilatar la máscara, que es la forma verdadera del
         // trazo). Las ilustraciones quedan fuera: conservan su ráster.
         var contoursData: Data?
+        var vectorLoops: [[CGPoint]] = []
+        var textMask: [UInt8] = []
         if settings.vectorizeText {
             stage?("Vectorizando la tinta…")
             let vectorMaxArea = max(1, Int(0.01 * Double(w * h)))
-            let textMask = VectorTracer.textOnlyMask(
+            textMask = VectorTracer.textOnlyMask(
                 mask, width: w, height: h,
                 keepRects: keepRects, maxArea: vectorMaxArea
             )
-            let loops = VectorTracer.traceContours(
+            vectorLoops = VectorTracer.traceContours(
                 mask: textMask, width: w, height: h, epsilon: 0.6
             )
-            if !loops.isEmpty {
-                contoursData = VectorTracer.encode(loops)
+            if !vectorLoops.isEmpty {
+                contoursData = VectorTracer.encode(vectorLoops)
             }
         }
         let inkMask = mask // máscara sin dilatar, para medir el color de tinta
@@ -180,6 +182,22 @@ enum RestorationEngine {
         let inkGamma = 1.0
             + (settings.contrast - 1.0) * 2.0
             + settings.strength.extraInkGamma
+
+        // Color de la tinta, medido sobre la imagen aplanada ANTES de
+        // componer (con la gamma aplicada para igualar la densidad final).
+        var inkColor: InkColor?
+        if !vectorLoops.isEmpty {
+            if settings.mode == .blackWhite {
+                inkColor = InkColor(r: 0, g: 0, b: 0)
+            } else {
+                let raw = DeepRestorer.averageInkColor(in: ctx, mask: inkMask)
+                inkColor = InkColor(
+                    r: pow(max(0, min(1, raw.r)), inkGamma),
+                    g: pow(max(0, min(1, raw.g)), inkGamma),
+                    b: pow(max(0, min(1, raw.b)), inkGamma)
+                )
+            }
+        }
 
         if settings.mode == .paper {
             // Papel restaurado: se conserva el papel aplanado (textura y tono
@@ -210,33 +228,54 @@ enum RestorationEngine {
             // Realzar solo la tinta conservada, sin tocar el papel.
             DeepRestorer.darkenInk(in: ctx, mask: mask, inkGamma: inkGamma)
         } else {
-            // Papel blanco puro (dilatación 1 px para conservar el borde
-            // antialiasado de los trazos).
+            // Papel blanco puro. Los glifos vectorizados se EXCLUYEN del
+            // ráster (se pintan como papel) porque enseguida se rellenan como
+            // curvas suaves; el resto de la tinta (ilustraciones, elementos
+            // no vectorizados) se compone dilatado 1 px para conservar su
+            // borde antialiasado original.
             stage?("Componiendo página…")
+            var exclude: [UInt8]? = nil
+            if !vectorLoops.isEmpty {
+                exclude = DeepRestorer.dilated(textMask, width: w, height: h)
+            }
             if settings.mode != .blackWhite {
                 mask = DeepRestorer.dilated(mask, width: w, height: h)
             }
             DeepRestorer.compose(
                 in: ctx, gray: gray, mask: mask,
+                excludeMask: exclude,
                 mode: settings.mode, inkGamma: inkGamma
             )
         }
 
-        // Color medio de la tinta compuesta (relleno de los vectores).
-        var inkColor: InkColor?
-        if contoursData != nil {
-            inkColor = settings.mode == .blackWhite
-                ? InkColor(r: 0, g: 0, b: 0)
-                : DeepRestorer.averageInkColor(in: ctx, mask: inkMask)
+        // 6b. Recomposición vectorial EN EL RÁSTER: cada glifo se rellena como
+        // curva Bézier con antialiasing de CoreGraphics. Es lo que elimina el
+        // dentado de píxel de las letras también en pantalla, no solo en el PDF.
+        if !vectorLoops.isEmpty {
+            stage?("Alisando letras (relleno vectorial)…")
+            let ink = inkColor ?? InkColor(r: 0.05, g: 0.05, b: 0.05)
+            let path = VectorTracer.smoothPath(loops: vectorLoops) { point in
+                // Contornos en coords de bitmap (fila 0 arriba) → CG (y arriba).
+                CGPoint(x: point.x, y: CGFloat(h) - point.y)
+            }
+            ctx.saveGState()
+            ctx.setShouldAntialias(true)
+            ctx.setAllowsAntialiasing(true)
+            ctx.setFillColor(CGColor(red: ink.r, green: ink.g, blue: ink.b, alpha: 1))
+            ctx.addPath(path)
+            ctx.fillPath(using: .evenOdd)
+            ctx.restoreGState()
         }
 
         guard let composed = ctx.makeImage() else {
             throw RestorationEngineError.renderFailed
         }
 
-        // 7. Enfoque final (no en B/N puro: ya es binario).
+        // 7. Enfoque final: solo cuando NO hay alisado vectorial (la máscara
+        // de enfoque añadiría halos alrededor de los bordes ya perfectos) ni
+        // es B/N puro (binario).
         let finalImage: CGImage
-        if settings.sharpness > 0 && settings.mode != .blackWhite {
+        if settings.sharpness > 0 && settings.mode != .blackWhite && vectorLoops.isEmpty {
             stage?("Enfocando…")
             finalImage = try sharpened(composed, settings: settings, dpi: dpi)
         } else {
