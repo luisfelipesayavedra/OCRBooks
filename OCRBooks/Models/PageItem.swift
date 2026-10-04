@@ -23,6 +23,16 @@ struct RecognizedLine: Codable, Equatable {
     let bbox: CGRect
 }
 
+/// Un trazo del borrador manual, en coordenadas de píxel de la imagen
+/// restaurada (origen abajo-izquierda, como CoreGraphics y PDF). Se aplica
+/// como pintura blanca con extremos redondeados, tanto en pantalla como al
+/// exportar el PDF final.
+struct EraserStroke: Codable, Equatable, Identifiable {
+    var id = UUID()
+    var points: [CGPoint]
+    var width: CGFloat
+}
+
 /// Una página del libro. Las imágenes a resolución completa viven en disco
 /// (carpeta de caché) para que libros grandes no agoten la memoria; en memoria
 /// solo se conservan miniaturas y vistas previas.
@@ -36,6 +46,7 @@ struct PageItem: Identifiable {
     var enhancedURL: URL? // PNG a resolución completa en disco
     var lines: [RecognizedLine] = []
     var skewAngle: Double = 0
+    var strokes: [EraserStroke] = [] // borrador manual
 
     var text: String {
         lines.map(\.text).joined(separator: "\n")

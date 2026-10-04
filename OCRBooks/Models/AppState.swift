@@ -134,7 +134,10 @@ final class AppState: ObservableObject {
               let cacheDir else { return }
 
         let currentSettings = settings
-        pages[index].status = .processing("Reconstruyendo a \(Int(currentSettings.dpi)) ppp…")
+        let stepLabel = currentSettings.strength == .light
+            ? "Realzando a \(Int(currentSettings.dpi)) ppp…"
+            : "Reconstrucción profunda a \(Int(currentSettings.dpi)) ppp…"
+        pages[index].status = .processing(stepLabel)
 
         let result: Result<ProcessedPage, Error> = await Task.detached(priority: .userInitiated) {
             do {
@@ -178,10 +181,28 @@ final class AppState: ObservableObject {
             pages[index].enhancedURL = processed.enhancedURL
             pages[index].lines = processed.lines
             pages[index].skewAngle = processed.skewAngle
+            pages[index].strokes = [] // la imagen cambió: los trazos antiguos ya no aplican
             pages[index].status = .done
         case .failure(let error):
             pages[index].status = .failed(error.localizedDescription)
         }
+    }
+
+    // MARK: - Borrador manual
+
+    func addStroke(_ stroke: EraserStroke, at index: Int) {
+        guard pages.indices.contains(index) else { return }
+        pages[index].strokes.append(stroke)
+    }
+
+    func undoStroke(at index: Int) {
+        guard pages.indices.contains(index), !pages[index].strokes.isEmpty else { return }
+        pages[index].strokes.removeLast()
+    }
+
+    func clearStrokes(at index: Int) {
+        guard pages.indices.contains(index) else { return }
+        pages[index].strokes.removeAll()
     }
 
     // MARK: - Exportar
@@ -227,7 +248,12 @@ final class AppState: ObservableObject {
             let (exportPages, dpi): ([PDFExporter.ExportPage], Double) = await MainActor.run {
                 let items = self.pages.compactMap { page -> PDFExporter.ExportPage? in
                     guard let imageURL = page.enhancedURL else { return nil }
-                    return PDFExporter.ExportPage(index: page.id, imageURL: imageURL, lines: page.lines)
+                    return PDFExporter.ExportPage(
+                        index: page.id,
+                        imageURL: imageURL,
+                        lines: page.lines,
+                        strokes: page.strokes
+                    )
                 }
                 self.progressLabel = "Escribiendo PDF…"
                 return (items, self.settings.dpi)

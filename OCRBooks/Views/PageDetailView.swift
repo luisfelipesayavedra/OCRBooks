@@ -1,56 +1,34 @@
 import SwiftUI
 
 enum DetailTab: String, CaseIterable, Identifiable {
-    case image = "Página"
-    case text = "Texto OCR"
-    var id: String { rawValue }
-}
-
-enum ImageMode: String, CaseIterable, Identifiable {
+    case editor = "Editor"
     case comparison = "Comparar"
-    case enhanced = "Restaurada"
-    case original = "Original"
+    case text = "Texto OCR"
     var id: String { rawValue }
 }
 
 struct PageDetailView: View {
     @EnvironmentObject private var state: AppState
-    @State private var tab: DetailTab = .image
-    @State private var mode: ImageMode = .comparison
+    @State private var tab: DetailTab = .editor
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Picker("", selection: $tab) {
-                    ForEach(DetailTab.allCases) { tab in
-                        Text(tab.rawValue).tag(tab)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 220)
-
-                Spacer()
-
-                if tab == .image, state.selectedPage?.enhancedPreview != nil {
-                    Picker("", selection: $mode) {
-                        ForEach(ImageMode.allCases) { mode in
-                            Text(mode.rawValue).tag(mode)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 280)
-                }
-            }
-            .padding(10)
-
-            Divider()
-
             if let page = state.selectedPage {
                 switch tab {
-                case .image:
-                    PageImageView(page: page, mode: mode)
+                case .editor:
+                    EditorView(page: page, tab: $tab)
+                case .comparison:
+                    VStack(spacing: 0) {
+                        tabPicker
+                        Divider()
+                        ComparisonContainer(page: page)
+                    }
                 case .text:
-                    TextPanel(page: page)
+                    VStack(spacing: 0) {
+                        tabPicker
+                        Divider()
+                        TextPanel(page: page)
+                    }
                 }
             } else {
                 Text("Selecciona una página")
@@ -60,79 +38,201 @@ struct PageDetailView: View {
         }
         .background(Color(nsColor: .controlBackgroundColor))
     }
-}
 
-struct PageImageView: View {
-    @EnvironmentObject private var state: AppState
-    let page: PageItem
-    let mode: ImageMode
-
-    var body: some View {
-        Group {
-            if let enhanced = page.enhancedPreview {
-                switch mode {
-                case .comparison:
-                    if let original = page.originalPreview {
-                        ComparisonView(original: original, enhanced: enhanced)
-                    } else {
-                        SingleImageView(image: enhanced)
-                    }
-                case .enhanced:
-                    SingleImageView(image: enhanced)
-                case .original:
-                    if let original = page.originalPreview {
-                        SingleImageView(image: original)
-                    } else {
-                        SingleImageView(image: enhanced)
-                    }
+    private var tabPicker: some View {
+        HStack {
+            Picker("", selection: $tab) {
+                ForEach(DetailTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
                 }
-            } else if case .processing(let step) = page.status {
-                VStack(spacing: 12) {
-                    ProgressView()
-                    Text(step).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                VStack(spacing: 14) {
-                    if let thumbnail = page.thumbnail {
-                        Image(decorative: thumbnail, scale: 1)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxHeight: 420)
-                            .shadow(radius: 4)
-                    }
-                    Text("Página sin restaurar")
-                        .foregroundStyle(.secondary)
-                    Button {
-                        state.processSelectedPage()
-                    } label: {
-                        Label("Restaurar esta página", systemImage: "wand.and.stars")
-                    }
-                    .disabled(state.isWorking)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .pickerStyle(.segmented)
+            .frame(width: 300)
+            Spacer()
         }
+        .padding(10)
     }
 }
 
-struct SingleImageView: View {
-    let image: CGImage
+/// Editor principal: imagen restaurada a resolución completa, zoom libre
+/// (hasta 6400 %, píxel a píxel) y borrador manual de manchas.
+struct EditorView: View {
+    @EnvironmentObject private var state: AppState
+    let page: PageItem
+    @Binding var tab: DetailTab
+
+    @State private var tool: EditorTool = .pan
+    @State private var brushSize: CGFloat = 36
+    @State private var magnification: CGFloat = 0
+    @State private var fullImage: CGImage?
+    @State private var loadedURL: URL?
 
     var body: some View {
-        GeometryReader { geo in
-            ScrollView([.horizontal, .vertical]) {
-                Image(decorative: image, scale: 1)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(
-                        maxWidth: max(geo.size.width, 1),
-                        maxHeight: max(geo.size.height, 1)
-                    )
-                    .frame(width: geo.size.width, height: geo.size.height)
-            }
+        VStack(spacing: 0) {
+            toolbar
+            Divider()
+            content
         }
-        .padding(8)
+        .task(id: taskKey) {
+            await loadFullImage()
+        }
+    }
+
+    /// Recargar cuando cambia la página o su imagen restaurada.
+    private var taskKey: String {
+        "\(page.id)-\(page.enhancedURL?.absoluteString ?? "none")"
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 12) {
+            Picker("", selection: $tab) {
+                ForEach(DetailTab.allCases) { tab in
+                    Text(tab.rawValue).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 300)
+
+            Divider().frame(height: 18)
+
+            Picker("", selection: $tool) {
+                ForEach(EditorTool.allCases) { tool in
+                    Label(tool.label, systemImage: tool.icon).tag(tool)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 140)
+            .disabled(displayImage == nil)
+
+            if tool == .eraser {
+                HStack(spacing: 6) {
+                    Image(systemName: "circle")
+                        .font(.system(size: 8))
+                    Slider(value: $brushSize, in: 6...300)
+                        .frame(width: 110)
+                    Image(systemName: "circle")
+                        .font(.system(size: 16))
+                }
+                .help("Tamaño del borrador (en píxeles de la imagen)")
+
+                Button {
+                    state.undoStroke(at: page.id)
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .disabled(page.strokes.isEmpty)
+                .keyboardShortcut("z", modifiers: .command)
+                .help("Deshacer último trazo (⌘Z)")
+
+                Button {
+                    state.clearStrokes(at: page.id)
+                } label: {
+                    Image(systemName: "trash")
+                }
+                .disabled(page.strokes.isEmpty)
+                .help("Eliminar todos los trazos de esta página")
+            }
+
+            Spacer()
+
+            // Controles de zoom.
+            HStack(spacing: 6) {
+                Button {
+                    magnification = max(0.02, magnification / 1.4)
+                } label: {
+                    Image(systemName: "minus.magnifyingglass")
+                }
+                Text(magnification > 0 ? "\(Int(magnification * 100)) %" : "—")
+                    .font(.caption.monospacedDigit())
+                    .frame(width: 52)
+                Button {
+                    magnification = min(64, max(0.02, magnification) * 1.4)
+                } label: {
+                    Image(systemName: "plus.magnifyingglass")
+                }
+                Button("1:1") {
+                    magnification = 1
+                }
+                .help("Zoom 100 %: un punto de pantalla por píxel de imagen")
+            }
+            .disabled(displayImage == nil)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private var displayImage: CGImage? {
+        fullImage ?? page.enhancedPreview
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if let image = displayImage {
+            ZoomableCanvas(
+                image: image,
+                strokes: page.strokes,
+                tool: tool,
+                brushSize: brushSize,
+                magnification: $magnification,
+                onStroke: { stroke in
+                    state.addStroke(stroke, at: page.id)
+                }
+            )
+        } else if case .processing(let step) = page.status {
+            VStack(spacing: 12) {
+                ProgressView()
+                Text(step).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            VStack(spacing: 14) {
+                if let thumbnail = page.thumbnail {
+                    Image(decorative: thumbnail, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxHeight: 420)
+                        .shadow(radius: 4)
+                }
+                Text("Página sin restaurar")
+                    .foregroundStyle(.secondary)
+                Button {
+                    state.processSelectedPage()
+                } label: {
+                    Label("Restaurar esta página", systemImage: "wand.and.stars")
+                }
+                .disabled(state.isWorking)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func loadFullImage() async {
+        guard let url = page.enhancedURL else {
+            fullImage = nil
+            loadedURL = nil
+            return
+        }
+        guard url != loadedURL else { return }
+        let loaded = await Task.detached(priority: .userInitiated) {
+            ImageUtil.readImage(from: url)
+        }.value
+        fullImage = loaded
+        loadedURL = url
+    }
+}
+
+/// Contenedor del comparador antes/después (usa las vistas previas).
+struct ComparisonContainer: View {
+    let page: PageItem
+
+    var body: some View {
+        if let enhanced = page.enhancedPreview, let original = page.originalPreview {
+            ComparisonView(original: original, enhanced: enhanced)
+        } else {
+            Text("Restaura la página para comparar el antes y el después.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 }
 

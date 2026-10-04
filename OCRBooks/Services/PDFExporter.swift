@@ -25,6 +25,7 @@ enum PDFExporter {
         let index: Int
         let imageURL: URL
         let lines: [RecognizedLine]
+        let strokes: [EraserStroke]
     }
 
     static func export(pages: [ExportPage], dpi: Double, to url: URL) throws {
@@ -50,12 +51,46 @@ enum PDFExporter {
                 ctx.interpolationQuality = .high
                 ctx.draw(image, in: mediaBox)
 
+                // Trazos del borrador manual, como vectores blancos encima de
+                // la imagen (misma orientación que el canvas del editor).
+                if !page.strokes.isEmpty {
+                    let scale = 72.0 / CGFloat(dpi)
+                    drawEraserStrokes(page.strokes, in: ctx, scale: scale)
+                }
+
                 drawInvisibleTextLayer(page.lines, in: ctx, pageWidth: widthPt, pageHeight: heightPt)
 
                 ctx.endPDFPage()
             }
         }
         ctx.closePDF()
+    }
+
+    private static func drawEraserStrokes(_ strokes: [EraserStroke], in ctx: CGContext, scale: CGFloat) {
+        ctx.saveGState()
+        ctx.setStrokeColor(CGColor(gray: 1, alpha: 1))
+        ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        for stroke in strokes {
+            guard let first = stroke.points.first else { continue }
+            if stroke.points.count == 1 {
+                let r = stroke.width * scale / 2
+                ctx.fillEllipse(in: CGRect(
+                    x: first.x * scale - r, y: first.y * scale - r,
+                    width: r * 2, height: r * 2
+                ))
+                continue
+            }
+            ctx.setLineWidth(stroke.width * scale)
+            ctx.beginPath()
+            ctx.move(to: CGPoint(x: first.x * scale, y: first.y * scale))
+            for point in stroke.points.dropFirst() {
+                ctx.addLine(to: CGPoint(x: point.x * scale, y: point.y * scale))
+            }
+            ctx.strokePath()
+        }
+        ctx.restoreGState()
     }
 
     /// Dibuja cada línea reconocida como texto invisible sobre su posición

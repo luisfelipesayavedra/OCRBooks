@@ -7,11 +7,21 @@ struct SettingsPanel: View {
 
     var body: some View {
         Form {
+            Section("Intensidad") {
+                Picker("Restauración", selection: $state.settings.strength) {
+                    ForEach(RestorationStrength.allCases) { strength in
+                        Text(strength.label).tag(strength)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+            }
+
             Section("Reconstrucción") {
                 Picker("Resolución", selection: $state.settings.dpi) {
                     Text("300 ppp").tag(300.0)
                     Text("400 ppp").tag(400.0)
                     Text("600 ppp").tag(600.0)
+                    Text("800 ppp (lento)").tag(800.0)
                 }
                 Toggle("Enderezar página (deskew)", isOn: $state.settings.deskew)
                 if let page = state.selectedPage, page.status == .done, state.settings.deskew {
@@ -22,15 +32,24 @@ struct SettingsPanel: View {
                 }
             }
 
-            Section("Limpieza") {
-                Toggle("Blanquear papel y quitar sombras", isOn: $state.settings.flattenBackground)
+            Section("Manchas y ruido") {
                 LabeledContent("Reducción de ruido") {
                     Slider(value: $state.settings.noiseReduction, in: 0...0.1)
+                }
+                if state.settings.strength == .light {
+                    Toggle("Blanquear papel y quitar sombras", isOn: $state.settings.flattenBackground)
+                } else {
+                    LabeledContent("Eliminar motas") {
+                        Slider(value: $state.settings.despeckleLevel, in: 0...3)
+                    }
+                    Toggle("Borrar manchas fuera del texto", isOn: $state.settings.removeStainsOutsideText)
+                    Toggle("Proteger ilustraciones y grabados", isOn: $state.settings.protectIllustrations)
+                        .disabled(!state.settings.removeStainsOutsideText)
                 }
             }
 
             Section("Letras") {
-                LabeledContent("Contraste") {
+                LabeledContent("Densidad de tinta") {
                     Slider(value: $state.settings.contrast, in: 1.0...1.8)
                 }
                 LabeledContent("Nitidez") {
@@ -68,7 +87,7 @@ struct SettingsPanel: View {
                 }
                 .disabled(!state.hasDocument || state.isWorking)
             } footer: {
-                Text("El libro se procesa página por página a resolución completa; la calidad no depende del tamaño del archivo.")
+                Text("En modo profundo/máximo la página se reconstruye píxel a píxel: papel blanco puro, umbral adaptativo palabra por palabra y limpieza de manchas guiada por el texto detectado. Consume más memoria y CPU a cambio de máxima calidad.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

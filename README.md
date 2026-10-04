@@ -6,24 +6,30 @@ App nativa de macOS para **restaurar libros antiguos escaneados en PDF** y recon
 
 ## Qué hace
 
-Para cada página del PDF:
+Para cada página del PDF (modo **Profundo**/**Máximo**, el predeterminado):
 
-1. **Reconstrucción a alta resolución** — la página se vuelve a renderizar desde el PDF original a 300/400/600 ppp. Nunca se re-escala una imagen ya degradada, por eso se recupera resolución y definición reales.
+1. **Reconstrucción a alta resolución** — la página se vuelve a renderizar desde el PDF original a 300/400/600/800 ppp. Nunca se re-escala una imagen ya degradada, por eso se recupera resolución y definición reales.
 2. **Enderezado (deskew)** — detecta la inclinación del escaneo por perfil de proyección (±3°, pasos de 0,25°) y la corrige, alineando las líneas de texto.
-3. **Blanqueo del papel** — aplana la iluminación dividiendo la página entre una versión muy desenfocada de sí misma: desaparecen las sombras de encuadernación, manchas de luz y el amarilleo irregular, sin tocar la tinta.
-4. **Reducción de ruido** — elimina el grano del escaneo.
-5. **Contraste y nitidez** — realza el contraste y aplica máscara de enfoque calibrada a la resolución para recuperar el perfil de las letras. Tres modos de salida: color restaurado, escala de grises o blanco y negro puro (binarización Otsu).
-6. **OCR con Vision de Apple** — reconocimiento en modo preciso con corrección de idioma (español, inglés, francés, italiano, portugués, alemán).
-7. **Exportación** — PDF final con la imagen restaurada de cada página más una **capa de texto invisible perfectamente alineada**: el libro conserva su estética original pero se puede buscar, seleccionar y copiar.
+3. **Aplanado de iluminación en CPU** — estima el fondo (papel) por bloques y normaliza cada píxel contra él: desaparecen sombras de encuadernación, manchas de luz y amarilleo irregular. El papel queda blanco puro.
+4. **Binarización adaptativa de Sauvola** — el umbral tinta/papel se calcula localmente alrededor de cada píxel (el equivalente a decidir palabra por palabra qué trazos son reales), lo que rescata tinta desvaída que un umbral global perdería.
+5. **Eliminación de manchas y motas** — análisis de componentes conexas: cada mota, punto o mancha del escaneo se identifica como grupo de píxeles y se elimina según su tamaño; una pasada previa de OCR delimita las zonas de texto y **todo lo que queda fuera de ellas se borra** (con protección opcional para ilustraciones, grabados y capitulares).
+6. **Composición y nitidez** — papel 100 % blanco; la tinta conserva el detalle del trazo original con densidad ajustable, más máscara de enfoque final. Tres modos: color restaurado, escala de grises o blanco y negro puro.
+7. **OCR con Vision de Apple** — segunda pasada de reconocimiento en modo preciso sobre la página ya restaurada (español, inglés, francés, italiano, portugués, alemán).
+8. **Borrador manual** — para lo que el algoritmo no pueda decidir: pinta de blanco cualquier marca restante directamente sobre la página, con tamaño de pincel ajustable y deshacer. Los trazos se aplican también al PDF exportado.
+9. **Exportación** — PDF final con la imagen restaurada de cada página más una **capa de texto invisible perfectamente alineada**: el libro conserva su estética original pero se puede buscar, seleccionar y copiar.
+
+El modo **Suave** conserva la cadena ligera de realce (Core Image) para quien solo quiera mejorar contraste y nitidez sin reconstruir la página.
 
 Las imágenes a resolución completa se guardan en una caché en disco, de modo que libros de cientos de páginas no agotan la memoria: el procesamiento es estrictamente página por página.
 
 ## Interfaz
 
 - **Barra lateral** con miniaturas y estado de cada página (pendiente / procesando / restaurada).
-- **Visor con comparador antes/después**: un divisor arrastrable muestra el original y la versión restaurada sobre la misma página.
+- **Editor con zoom real**: la página restaurada se muestra a resolución completa con zoom del 2 % al 6400 % (pellizco del trackpad o botones), hasta inspeccionar píxel a píxel los detalles más mínimos.
+- **Borrador** integrado en el editor: pincel de 6–300 px, deshacer (⌘Z) y limpiar trazos.
+- **Comparador antes/después**: un divisor arrastrable muestra el original y la versión restaurada sobre la misma página.
 - **Pestaña de texto OCR** con número de líneas, confianza media y copia al portapapeles.
-- **Panel de ajustes**: resolución, enderezado, blanqueo, ruido, contraste, nitidez, modo de salida e idioma. Reprocesar una página aplica los nuevos ajustes al instante.
+- **Panel de ajustes**: intensidad (suave/profunda/máxima), resolución, enderezado, eliminación de motas y manchas, protección de ilustraciones, densidad de tinta, nitidez, modo de salida e idioma. Reprocesar una página aplica los nuevos ajustes al instante.
 
 ## Requisitos
 
@@ -55,14 +61,16 @@ OCRBooks/
 ├── Services/
 │   ├── PDFRenderer.swift        # Render a DPI alto desde PDFKit
 │   ├── SkewDetector.swift       # Detección de inclinación (proyección)
-│   ├── RestorationEngine.swift  # Cadena Core Image de restauración
+│   ├── RestorationEngine.swift  # Orquestación suave (CI) / profunda (CPU)
+│   ├── DeepRestorer.swift       # Aplanado, Sauvola, despeckle, composición
 │   ├── OCRService.swift         # Vision (VNRecognizeTextRequest, .accurate)
-│   ├── PDFExporter.swift        # PDF con capa de texto invisible (Core Text)
+│   ├── PDFExporter.swift        # PDF con texto invisible + trazos de borrador
 │   └── ImageUtil.swift          # Escalado y PNG sin pérdida
 └── Views/
     ├── ContentView.swift        # Ventana, toolbar y flujo general
     ├── SidebarView.swift        # Lista de páginas con miniaturas
-    ├── PageDetailView.swift     # Visor + comparador antes/después
+    ├── PageDetailView.swift     # Editor + comparador + texto
+    ├── ZoomableCanvas.swift     # Canvas AppKit: zoom 2–6400 % y borrador
     ├── SettingsPanel.swift      # Ajustes de restauración
     └── TextPanel.swift          # Texto reconocido
 ```

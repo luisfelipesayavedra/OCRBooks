@@ -17,6 +17,53 @@ enum OutputMode: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// Intensidad de la restauración.
+enum RestorationStrength: String, CaseIterable, Identifiable, Codable {
+    /// Solo realce (cadena Core Image ligera, sin reconstrucción).
+    case light
+    /// Reconstrucción profunda: binarización adaptativa Sauvola palabra por
+    /// palabra, papel 100 % blanco, eliminación de manchas y motas.
+    case deep
+    /// Igual que la profunda pero con umbrales más duros, tinta más densa y
+    /// despeckle más estricto.
+    case maximum
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .light: return "Suave (solo realce)"
+        case .deep: return "Profunda (reconstrucción)"
+        case .maximum: return "Máxima (agresiva)"
+        }
+    }
+
+    /// Parámetro k de Sauvola: más alto = umbral más exigente (más agresivo).
+    var sauvolaK: Double {
+        switch self {
+        case .light: return 0
+        case .deep: return 0.15
+        case .maximum: return 0.22
+        }
+    }
+
+    var despeckleMultiplier: Double {
+        switch self {
+        case .light: return 0
+        case .deep: return 1.0
+        case .maximum: return 2.5
+        }
+    }
+
+    var extraInkGamma: Double {
+        switch self {
+        case .light: return 0
+        case .deep: return 0.1
+        case .maximum: return 0.45
+        }
+    }
+}
+
 /// Idiomas soportados por Vision para el reconocimiento.
 enum OCRLanguage: String, CaseIterable, Identifiable, Codable {
     case spanish = "es-ES"
@@ -45,6 +92,9 @@ struct RestorationSettings: Equatable, Codable {
     /// Resolución de reconstrucción de la página (píxeles por pulgada).
     var dpi: Double = 400
 
+    /// Intensidad de restauración. Por defecto, reconstrucción profunda.
+    var strength: RestorationStrength = .deep
+
     /// Corrige la inclinación del escaneo (deskew).
     var deskew: Bool = true
 
@@ -55,11 +105,22 @@ struct RestorationSettings: Equatable, Codable {
     /// Nivel de reducción de ruido/grano del escaneo (0 = ninguno).
     var noiseReduction: Double = 0.02
 
-    /// Contraste final (1.0 = sin cambio).
+    /// Contraste / densidad de la tinta (1.0 = sin cambio).
     var contrast: Double = 1.15
 
     /// Intensidad del realce de nitidez de las letras.
     var sharpness: Double = 1.4
+
+    /// Tamaño relativo de motas/puntos a eliminar (0 = no eliminar).
+    var despeckleLevel: Double = 1.0
+
+    /// Elimina por completo manchas y marcas que estén fuera de las zonas de
+    /// texto detectadas por el OCR (limpieza guiada por el texto).
+    var removeStainsOutsideText: Bool = true
+
+    /// Conserva elementos grandes fuera del texto (grabados, ilustraciones,
+    /// capitulares) aunque la limpieza de manchas esté activa.
+    var protectIllustrations: Bool = true
 
     /// Modo de salida.
     var mode: OutputMode = .grayscale
