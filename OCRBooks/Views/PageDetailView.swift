@@ -63,9 +63,12 @@ struct EditorView: View {
 
     @State private var tool: EditorTool = .pan
     @State private var brushSize: CGFloat = 36
-    @State private var magnification: CGFloat = 0
     @State private var fullImage: CGImage?
     @State private var loadedURL: URL?
+    @State private var vectorPath: CGPath?
+    @State private var loadedVectorURL: URL?
+    @State private var vectorMode: VectorDisplayMode = .off
+    @StateObject private var zoom = ZoomController()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -75,12 +78,13 @@ struct EditorView: View {
         }
         .task(id: taskKey) {
             await loadFullImage()
+            await loadVectors()
         }
     }
 
     /// Recargar cuando cambia la página o su imagen restaurada.
     private var taskKey: String {
-        "\(page.id)-\(page.enhancedURL?.absoluteString ?? "none")"
+        "\(page.id)-\(page.enhancedURL?.absoluteString ?? "none")-\(page.contoursURL?.absoluteString ?? "none")"
     }
 
     private var toolbar: some View {
@@ -133,27 +137,44 @@ struct EditorView: View {
                 .help("Eliminar todos los trazos de esta página")
             }
 
+            if vectorPath != nil {
+                Picker("", selection: $vectorMode) {
+                    ForEach(VectorDisplayMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 230)
+                .help("Vista previa de la recomposición vectorial: Vectorial muestra la página como quedará en el PDF; Contornos resalta en rojo lo que se vectorizó")
+            }
+
             Spacer()
 
-            // Controles de zoom.
+            // Controles de zoom (órdenes directas al visor, sin bindings).
             HStack(spacing: 6) {
                 Button {
-                    magnification = max(0.02, magnification / 1.4)
+                    zoom.zoomOut()
                 } label: {
                     Image(systemName: "minus.magnifyingglass")
                 }
-                Text(magnification > 0 ? "\(Int(magnification * 100)) %" : "—")
+                Text("\(Int(zoom.magnification * 100)) %")
                     .font(.caption.monospacedDigit())
                     .frame(width: 52)
                 Button {
-                    magnification = min(64, max(0.02, magnification) * 1.4)
+                    zoom.zoomIn()
                 } label: {
                     Image(systemName: "plus.magnifyingglass")
                 }
                 Button("1:1") {
-                    magnification = 1
+                    zoom.actualSize()
                 }
-                .help("Zoom 100 %: un punto de pantalla por píxel de imagen")
+                .help("Zoom 100 %: un punto por píxel de imagen")
+                Button {
+                    zoom.fit()
+                } label: {
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                }
+                .help("Encajar la página en la ventana (también: doble clic)")
             }
             .disabled(displayImage == nil)
         }
@@ -173,7 +194,10 @@ struct EditorView: View {
                 strokes: page.strokes,
                 tool: tool,
                 brushSize: brushSize,
-                magnification: $magnification,
+                vectorPath: vectorPath,
+                vectorColor: inkCGColor,
+                vectorMode: vectorMode,
+                controller: zoom,
                 onStroke: { stroke in
                     state.addStroke(stroke, at: page.id)
                 }
@@ -206,6 +230,11 @@ struct EditorView: View {
         }
     }
 
+    private var inkCGColor: CGColor {
+        let ink = page.inkColor ?? InkColor(r: 0.05, g: 0.05, b: 0.05)
+        return CGColor(red: ink.r, green: ink.g, blue: ink.b, alpha: 1)
+    }
+
     private func loadFullImage() async {
         guard let url = page.enhancedURL else {
             fullImage = nil
@@ -218,6 +247,34 @@ struct EditorView: View {
         }.value
         fullImage = loaded
         loadedURL = url
+    }
+
+    /// Carga los contornos .vec y construye el CGPath en coordenadas del
+    /// canvas (origen abajo-izquierda), todo fuera del hilo principal.
+    private func loadVectors() async {
+        guard let url = page.contoursURL else {
+            vectorPath = nil
+            loadedVectorURL = nil
+            vectorMode = .off
+            return
+        }
+        guard url != loadedVectorURL else { return }
+        // Los contornos están en píxeles de la imagen a resolución completa;
+        // solo tienen sentido sobre ella (nunca sobre la vista previa reducida).
+        guard let full = fullImage else { return }
+        let heightPx = CGFloat(full.height)
+        let path = await Task.detached(priority: .userInitiated) { () -> CGPath? in
+            guard let data = try? Data(contentsOf: url),
+                  let loops = VectorTracer.decode(data),
+                  !loops.isEmpty else { return nil }
+            // Píxeles (fila 0 arriba) → coordenadas del canvas (y arriba).
+            return VectorTracer.smoothPath(loops: loops) { point in
+                CGPoint(x: point.x, y: heightPx - point.y)
+            }
+        }.value
+        vectorPath = path
+        loadedVectorURL = url
+        if path == nil { vectorMode = .off }
     }
 }
 

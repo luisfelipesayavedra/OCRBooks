@@ -26,7 +26,8 @@ Las imágenes a resolución completa se guardan en una caché en disco, de modo 
 ## Interfaz
 
 - **Barra lateral** con miniaturas y estado de cada página (pendiente / procesando / restaurada).
-- **Editor con zoom real**: la página restaurada se muestra a resolución completa con zoom del 2 % al 6400 % (pellizco del trackpad o botones), hasta inspeccionar píxel a píxel los detalles más mínimos.
+- **Editor con zoom real**: la página restaurada se muestra a resolución completa con zoom del 2 % al 6400 % — pellizco del trackpad, ⌘+rueda centrado en el cursor, botones ±/1:1/encajar, doble clic para alternar encaje/100 % y arrastre para desplazarse — hasta inspeccionar píxel a píxel los detalles más mínimos.
+- **Vista previa vectorial** en el editor: *Vectorial* muestra la página exactamente como quedará en el PDF (relleno con el color real de la tinta); *Contornos* resalta en rojo lo que se vectorizó, para auditar la cobertura antes de exportar.
 - **Borrador** integrado en el editor: pincel de 6–300 px, deshacer (⌘Z) y limpiar trazos.
 - **Comparador antes/después**: un divisor arrastrable muestra el original y la versión restaurada sobre la misma página.
 - **Pestaña de texto OCR** con número de líneas, confianza media y copia al portapapeles.
