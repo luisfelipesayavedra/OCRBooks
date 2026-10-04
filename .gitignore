@@ -1,0 +1,13 @@
+# Xcode / proyecto generado por XcodeGen
+OCRBooks.xcodeproj/
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+
+# Archivos generados por XcodeGen en la compilación
+OCRBooks/Info.plist
+OCRBooks/OCRBooks.entitlements
+
+# macOS
+.DS_Store
