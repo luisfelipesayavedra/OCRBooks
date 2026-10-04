@@ -7,9 +7,11 @@ options:
 
 packages:
   # OpenCV precompilado (xcframework) para el inpainting de manchas.
+  # Fijado a 4.13.0: el binario de 5.0.0 referencia símbolos de ONNX Runtime
+  # (MlasGemm*, MlasFlashAttention…) que el paquete no enlaza y rompe el link.
   OpenCV:
     url: https://github.com/yeatse/opencv-spm
-    from: 5.0.0
+    exactVersion: 4.13.0
 
 targets:
   OCRBooks:
