@@ -61,10 +61,24 @@ struct EditorView: View {
     let page: PageItem
     @Binding var tab: DetailTab
 
+    enum EraseMode: String, CaseIterable, Identifiable {
+        case white
+        case inpaint
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .white: return "Blanco"
+            case .inpaint: return "Reconstruir"
+            }
+        }
+    }
+
     @State private var tool: EditorTool = .pan
+    @State private var eraseMode: EraseMode = .white
     @State private var brushSize: CGFloat = 36
     @State private var fullImage: CGImage?
     @State private var loadedURL: URL?
+    @State private var loadedVersion = -1
     @State private var vectorPath: CGPath?
     @State private var loadedVectorURL: URL?
     @State private var vectorMode: VectorDisplayMode = .off
@@ -82,9 +96,10 @@ struct EditorView: View {
         }
     }
 
-    /// Recargar cuando cambia la página o su imagen restaurada.
+    /// Recargar cuando cambia la página, su imagen restaurada o una edición
+    /// destructiva (borrador reconstructivo).
     private var taskKey: String {
-        "\(page.id)-\(page.enhancedURL?.absoluteString ?? "none")-\(page.contoursURL?.absoluteString ?? "none")"
+        "\(page.id)-\(page.enhancedURL?.absoluteString ?? "none")-\(page.contoursURL?.absoluteString ?? "none")-v\(page.editVersion)"
     }
 
     private var toolbar: some View {
@@ -109,6 +124,15 @@ struct EditorView: View {
             .disabled(displayImage == nil)
 
             if tool == .eraser {
+                Picker("", selection: $eraseMode) {
+                    ForEach(EraseMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 150)
+                .help("Blanco: pinta de blanco (reversible con ⌘Z). Reconstruir: rellena con el papel circundante mediante inpainting; deshacer = reprocesar la página.")
+
                 HStack(spacing: 6) {
                     Image(systemName: "circle")
                         .font(.system(size: 8))
@@ -124,9 +148,9 @@ struct EditorView: View {
                 } label: {
                     Image(systemName: "arrow.uturn.backward")
                 }
-                .disabled(page.strokes.isEmpty)
+                .disabled(page.strokes.isEmpty || eraseMode == .inpaint)
                 .keyboardShortcut("z", modifiers: .command)
-                .help("Deshacer último trazo (⌘Z)")
+                .help("Deshacer último trazo blanco (⌘Z)")
 
                 Button {
                     state.clearStrokes(at: page.id)
@@ -199,9 +223,27 @@ struct EditorView: View {
                 vectorMode: vectorMode,
                 controller: zoom,
                 onStroke: { stroke in
-                    state.addStroke(stroke, at: page.id)
+                    switch eraseMode {
+                    case .white:
+                        state.addStroke(stroke, at: page.id)
+                    case .inpaint:
+                        Task { await state.applyInpaintStroke(stroke, at: page.id) }
+                    }
                 }
             )
+            .overlay(alignment: .bottomTrailing) {
+                if state.inpaintingPages.contains(page.id) {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Reconstruyendo papel…")
+                    }
+                    .font(.caption)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.thinMaterial, in: Capsule())
+                    .padding(12)
+                }
+            }
         } else if case .processing(let step) = page.status {
             VStack(spacing: 12) {
                 ProgressView()
@@ -241,12 +283,13 @@ struct EditorView: View {
             loadedURL = nil
             return
         }
-        guard url != loadedURL else { return }
+        guard url != loadedURL || page.editVersion != loadedVersion else { return }
         let loaded = await Task.detached(priority: .userInitiated) {
             ImageUtil.readImage(from: url)
         }.value
         fullImage = loaded
         loadedURL = url
+        loadedVersion = page.editVersion
     }
 
     /// Carga los contornos .vec y construye el CGPath en coordenadas del

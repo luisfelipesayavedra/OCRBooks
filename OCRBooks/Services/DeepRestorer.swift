@@ -302,6 +302,26 @@ enum DeepRestorer {
         return out
     }
 
+    /// Oscurece solo la tinta (píxeles con mask == 1) aplicando gamma por
+    /// canal, sin tocar el papel. Para el modo "Papel restaurado".
+    static func darkenInk(in ctx: CGContext, mask: [UInt8], inkGamma: Double) {
+        guard let data = ctx.data, inkGamma > 1.001 else { return }
+        let w = ctx.width, h = ctx.height, bpr = ctx.bytesPerRow
+        let px = data.bindMemory(to: UInt8.self, capacity: bpr * h)
+        let gamma = Float(inkGamma)
+        for y in 0..<h {
+            let row = y * bpr
+            let grow = y * w
+            for x in 0..<w where mask[grow + x] == 1 {
+                let o = row + x * 4
+                for c in 0..<3 {
+                    let v = powf(min(1, max(0, Float(px[o + c]) / 255)), gamma) * 255
+                    px[o + c] = UInt8(max(0, min(255, v)))
+                }
+            }
+        }
+    }
+
     /// Color medio de la tinta ya compuesta (para rellenar los contornos
     /// vectoriales con el mismo tono que el trazo impreso).
     static func averageInkColor(in ctx: CGContext, mask: [UInt8]) -> InkColor {
@@ -357,7 +377,7 @@ enum DeepRestorer {
                     switch mode {
                     case .blackWhite:
                         px[o] = 0; px[o + 1] = 0; px[o + 2] = 0
-                    case .grayscale:
+                    case .paper, .grayscale:
                         let v = powf(min(1, max(0, gray[grow + x] / 255)), gamma) * 255
                         let u = UInt8(max(0, min(255, v)))
                         px[o] = u; px[o + 1] = u; px[o + 2] = u

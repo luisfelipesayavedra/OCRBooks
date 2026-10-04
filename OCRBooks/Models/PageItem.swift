@@ -60,6 +60,9 @@ struct PageItem: Identifiable {
     /// DPI real de la imagen restaurada (puede ser el doble del ajuste cuando
     /// actuó la reconstrucción IA). 0 = aún sin procesar.
     var renderDPI: Double = 0
+    /// Aumenta con cada edición destructiva (borrador reconstructivo) para
+    /// que el editor recargue la imagen a resolución completa.
+    var editVersion: Int = 0
 
     var text: String {
         lines.map(\.text).joined(separator: "\n")

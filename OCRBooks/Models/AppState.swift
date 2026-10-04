@@ -17,6 +17,11 @@ final class AppState: ObservableObject {
     @Published var errorMessage: String?
     @Published var documentURL: URL?
     @Published var srState: SRState = .notDownloaded
+    @Published var inpaintingPages: Set<Int> = []
+
+    /// Etapa actual y hora de inicio de cada página en proceso: alimentan el
+    /// cronómetro visible que confirma que el proceso sigue vivo.
+    private var processingStages: [Int: (stage: String, start: Date)] = [:]
 
     let superRes = SuperResolution()
 
@@ -174,15 +179,33 @@ final class AppState: ObservableObject {
               let cacheDir else { return }
 
         let currentSettings = settings
-        let stepLabel = currentSettings.strength == .light
-            ? "Realzando a \(Int(currentSettings.dpi)) ppp…"
-            : "Reconstrucción profunda a \(Int(currentSettings.dpi)) ppp…"
-        pages[index].status = .processing(stepLabel)
+        processingStages[index] = ("Renderizando a \(Int(currentSettings.dpi)) ppp…", Date())
+        pages[index].status = .processing("Renderizando a \(Int(currentSettings.dpi)) ppp…")
+
+        // Cronómetro: refresca el estado cada segundo mientras se procesa,
+        // para que siempre se vea que el proceso sigue vivo.
+        let ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await MainActor.run { self?.refreshProcessingStatus(index) }
+            }
+        }
+        defer {
+            ticker.cancel()
+            processingStages[index] = nil
+        }
 
         let resolver: SuperResolution? =
             (currentSettings.aiReconstruction && superRes.isReady) ? superRes : nil
 
-        let result: Result<ProcessedPage, Error> = await Task.detached(priority: .userInitiated) { [weak self] in
+        // Las etapas llegan desde hilos de trabajo: se reenvían al MainActor.
+        let stageReporter: (String) -> Void = { [weak self] text in
+            Task { @MainActor [weak self] in
+                self?.updateStage(index, text)
+            }
+        }
+
+        let result: Result<ProcessedPage, Error> = await Task.detached(priority: .userInitiated) {
             do {
                 let original = try PDFRenderer.render(page: page, dpi: currentSettings.dpi)
 
@@ -197,20 +220,19 @@ final class AppState: ObservableObject {
                         let percent = Int(fraction * 100)
                         guard percent != lastShown, percent % 2 == 0 else { return }
                         lastShown = percent
-                        Task { @MainActor [weak self] in
-                            guard let self, self.pages.indices.contains(index),
-                                  case .processing = self.pages[index].status else { return }
-                            self.pages[index].status = .processing("IA reconstruyendo trazos… \(percent) %")
-                        }
-                    }
+                        stageReporter("IA reconstruyendo trazos… \(percent) %")
+                    },
+                    stage: stageReporter
                 )
                 let enhanced = output.image
 
+                stageReporter("Reconociendo texto (OCR final)…")
                 let lines = try OCRService.recognize(
                     in: enhanced,
                     languages: currentSettings.recognitionLanguages
                 )
 
+                stageReporter("Guardando página restaurada…")
                 let fileURL = cacheDir.appendingPathComponent(
                     String(format: "page-%04d.png", index)
                 )
@@ -260,6 +282,26 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Progreso con cronómetro
+
+    /// Actualiza la etapa visible de una página y refresca su estado con el
+    /// tiempo transcurrido ("Binarizando… · 1:42"). El cronómetro avanza cada
+    /// segundo aunque la etapa no cambie: si el reloj corre, el proceso vive.
+    private func updateStage(_ index: Int, _ text: String) {
+        guard let entry = processingStages[index] else { return }
+        processingStages[index] = (text, entry.start)
+        refreshProcessingStatus(index)
+    }
+
+    private func refreshProcessingStatus(_ index: Int) {
+        guard pages.indices.contains(index),
+              pages[index].status.isProcessing,
+              let entry = processingStages[index] else { return }
+        let elapsed = Int(Date().timeIntervalSince(entry.start))
+        let clock = String(format: "%d:%02d", elapsed / 60, elapsed % 60)
+        pages[index].status = .processing("\(entry.stage) · \(clock)")
+    }
+
     // MARK: - Borrador manual
 
     func addStroke(_ stroke: EraserStroke, at index: Int) {
@@ -275,6 +317,36 @@ final class AppState: ObservableObject {
     func clearStrokes(at index: Int) {
         guard pages.indices.contains(index) else { return }
         pages[index].strokes.removeAll()
+    }
+
+    /// Borrador en modo "Reconstruir": rellena la zona del trazo con el papel
+    /// circundante (inpainting OpenCV) y guarda el resultado en la imagen de
+    /// la página. Es destructivo: deshacer = reprocesar la página.
+    func applyInpaintStroke(_ stroke: EraserStroke, at index: Int) async {
+        guard pages.indices.contains(index),
+              let url = pages[index].enhancedURL,
+              !inpaintingPages.contains(index) else { return }
+        inpaintingPages.insert(index)
+        defer { inpaintingPages.remove(index) }
+
+        let preview: CGImage? = await Task.detached(priority: .userInitiated) {
+            guard let full = ImageUtil.readImage(from: url),
+                  let patched = Inpainter.applyStroke(stroke, to: full) else { return nil }
+            do {
+                try ImageUtil.writePNG(patched, to: url)
+            } catch {
+                return nil
+            }
+            return ImageUtil.scaled(patched, maxDimension: 1800)
+        }.value
+
+        guard pages.indices.contains(index) else { return }
+        if let preview {
+            pages[index].enhancedPreview = preview
+            pages[index].editVersion += 1 // fuerza la recarga del editor
+        } else {
+            errorMessage = "No se pudo reconstruir esa zona (inpainting)."
+        }
     }
 
     // MARK: - Exportar

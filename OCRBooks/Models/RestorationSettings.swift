@@ -5,6 +5,9 @@ enum OutputMode: String, CaseIterable, Identifiable, Codable {
     case color
     case grayscale
     case blackWhite
+    /// Conserva la textura y el tono del papel original (aplanado); las
+    /// manchas se rellenan con papel real mediante inpainting (OpenCV Telea).
+    case paper
 
     var id: String { rawValue }
 
@@ -13,6 +16,7 @@ enum OutputMode: String, CaseIterable, Identifiable, Codable {
         case .color: return "Color restaurado"
         case .grayscale: return "Escala de grises"
         case .blackWhite: return "Blanco y negro (texto)"
+        case .paper: return "Papel restaurado (inpaint)"
         }
     }
 }

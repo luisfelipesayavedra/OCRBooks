@@ -14,7 +14,7 @@ Para cada página del PDF (modo **Profundo**/**Máximo**, el predeterminado):
 3. **Aplanado de iluminación en CPU** — estima el fondo (papel) por bloques y normaliza cada píxel contra él: desaparecen sombras de encuadernación, manchas de luz y amarilleo irregular. El papel queda blanco puro.
 4. **Binarización adaptativa de Sauvola** — el umbral tinta/papel se calcula localmente alrededor de cada píxel (el equivalente a decidir palabra por palabra qué trazos son reales), lo que rescata tinta desvaída que un umbral global perdería.
 5. **Eliminación de manchas y motas** — análisis de componentes conexas: cada mota, punto o mancha del escaneo se identifica como grupo de píxeles y se elimina según su tamaño; una pasada previa de OCR delimita las zonas de texto y **todo lo que queda fuera de ellas se borra** (con protección opcional para ilustraciones, grabados y capitulares).
-6. **Composición y nitidez** — papel 100 % blanco; la tinta conserva el detalle del trazo original con densidad ajustable, más máscara de enfoque final. Tres modos: color restaurado, escala de grises o blanco y negro puro.
+6. **Composición y nitidez** — papel 100 % blanco; la tinta conserva el detalle del trazo original con densidad ajustable, más máscara de enfoque final. Cuatro modos: color restaurado, escala de grises, blanco y negro puro, o **Papel restaurado (inpaint)**: conserva la textura y el tono del papel original y rellena las manchas con papel real mediante inpainting de OpenCV (algoritmo de Telea).
 7. **OCR con Vision de Apple** — segunda pasada de reconocimiento en modo preciso sobre la página ya restaurada (español, inglés, francés, italiano, portugués, alemán).
 8. **Recomposición vectorial de la tinta** — los contornos reales de cada letra se trazan como curvas Bézier (marching squares → Douglas-Peucker → suavizado con detección de esquinas, estilo *potrace*) y se incrustan en el PDF: el texto queda **perfectamente nítido a cualquier zoom e impresión**, conservando la tipografía original del libro. Las ilustraciones y grabados permanecen en ráster, donde conservan su tramado.
 9. **Borrador manual** — para lo que el algoritmo no pueda decidir: pinta de blanco cualquier marca restante directamente sobre la página, con tamaño de pincel ajustable y deshacer. Los trazos se aplican también al PDF exportado.
@@ -29,7 +29,8 @@ Las imágenes a resolución completa se guardan en una caché en disco, de modo 
 - **Barra lateral** con miniaturas y estado de cada página (pendiente / procesando / restaurada).
 - **Editor con zoom real**: la página restaurada se muestra a resolución completa con zoom del 2 % al 6400 % — pellizco del trackpad, ⌘+rueda centrado en el cursor, botones ±/1:1/encajar, doble clic para alternar encaje/100 % y arrastre para desplazarse — hasta inspeccionar píxel a píxel los detalles más mínimos.
 - **Vista previa vectorial** en el editor: *Vectorial* muestra la página exactamente como quedará en el PDF (relleno con el color real de la tinta); *Contornos* resalta en rojo lo que se vectorizó, para auditar la cobertura antes de exportar.
-- **Borrador** integrado en el editor: pincel de 6–300 px, deshacer (⌘Z) y limpiar trazos.
+- **Borrador** integrado en el editor con dos modos: *Blanco* (pinta de blanco, reversible con ⌘Z) y *Reconstruir* (rellena la zona con el papel circundante mediante inpainting de OpenCV; solo procesa el recorte afectado, así que es casi instantáneo). Pincel de 6–300 px.
+- **Progreso con cronómetro**: cada página en proceso muestra la etapa actual ("Binarizando… · 1:42", "IA reconstruyendo trazos… 64 %") con un reloj que avanza cada segundo — si el reloj corre, el proceso está vivo.
 - **Comparador antes/después**: un divisor arrastrable muestra el original y la versión restaurada sobre la misma página.
 - **Pestaña de texto OCR** con número de líneas, confianza media y copia al portapapeles.
 - **Panel de ajustes**: intensidad (suave/profunda/máxima), resolución, enderezado, eliminación de motas y manchas, protección de ilustraciones, densidad de tinta, nitidez, modo de salida e idioma. Reprocesar una página aplica los nuevos ajustes al instante.
@@ -68,6 +69,7 @@ OCRBooks/
 │   ├── DeepRestorer.swift       # Aplanado, Sauvola, despeckle, composición
 │   ├── VectorTracer.swift       # Vectorización de la tinta (potrace-lite)
 │   ├── SuperResolution.swift    # Real-ESRGAN ×4 por Core ML (mosaicos)
+│   ├── Inpainter.swift          # Inpainting OpenCV (Telea): manchas/borrador
 │   ├── OCRService.swift         # Vision (VNRecognizeTextRequest, .accurate)
 │   ├── PDFExporter.swift        # PDF con texto invisible + trazos de borrador
 │   └── ImageUtil.swift          # Escalado y PNG sin pérdida
@@ -80,4 +82,4 @@ OCRBooks/
     └── TextPanel.swift          # Texto reconocido
 ```
 
-Todo usa frameworks del sistema (PDFKit, Core Image, Vision, Core Text): sin dependencias externas y el OCR se ejecuta **100 % en el Mac**, sin enviar nada a internet.
+Casi todo usa frameworks del sistema (PDFKit, Core Image, Vision, Core ML, Core Text, Accelerate). Dependencias externas: [opencv-spm](https://github.com/yeatse/opencv-spm) (OpenCV precompilado, para el inpainting) y el modelo Real-ESRGAN (descarga opcional en la primera activación de la IA). Todo el procesamiento —OCR e IA incluidos— se ejecuta **100 % en el Mac**; lo único que toca internet es la descarga única del modelo.

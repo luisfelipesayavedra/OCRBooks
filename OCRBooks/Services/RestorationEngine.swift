@@ -43,10 +43,12 @@ enum RestorationEngine {
         skewAngle: Double,
         settings: RestorationSettings,
         superResolver: SuperResolution? = nil,
-        srProgress: ((Double) -> Void)? = nil
+        srProgress: ((Double) -> Void)? = nil,
+        stage: ((String) -> Void)? = nil
     ) throws -> EnhanceOutput {
 
         // Pre-proceso común: deskew + ruido.
+        stage?("Enderezando y limpiando ruido…")
         var ci = CIImage(cgImage: input)
         let extent = ci.extent
         if settings.deskew, abs(skewAngle) >= SkewDetector.step / 2 {
@@ -74,13 +76,17 @@ enum RestorationEngine {
 
         switch settings.strength {
         case .light:
+            stage?("Realzando…")
             let image = try lightEnhance(base, settings: settings, dpi: effectiveDPI)
             return EnhanceOutput(
                 image: image, contoursData: nil, inkColor: nil,
                 scaleFactor: scaleFactor
             )
         case .deep, .maximum:
-            return try deepEnhance(base, settings: settings, dpi: effectiveDPI, scaleFactor: scaleFactor)
+            return try deepEnhance(
+                base, settings: settings, dpi: effectiveDPI,
+                scaleFactor: scaleFactor, stage: stage
+            )
         }
     }
 
@@ -90,7 +96,8 @@ enum RestorationEngine {
         _ base: CGImage,
         settings: RestorationSettings,
         dpi: Double,
-        scaleFactor: Double
+        scaleFactor: Double,
+        stage: ((String) -> Void)? = nil
     ) throws -> EnhanceOutput {
         let w = base.width
         let h = base.height
@@ -98,12 +105,14 @@ enum RestorationEngine {
 
         // 1. Aplanado de iluminación (siempre en el camino profundo: es la
         // base para que Sauvola y el despeckle funcionen bien).
+        stage?("Aplanando iluminación del papel…")
         DeepRestorer.flattenIllumination(in: ctx, dpi: dpi)
 
         // 2. Pasada previa de OCR sobre la imagen aplanada: las cajas de texto
         // guían la eliminación de manchas.
         var keepRects: [CGRect] = []
         if settings.removeStainsOutsideText, let flat = ctx.makeImage() {
+            stage?("Detectando zonas de texto (OCR previo)…")
             let lines = (try? OCRService.recognize(
                 in: flat, languages: settings.recognitionLanguages
             )) ?? []
@@ -121,6 +130,7 @@ enum RestorationEngine {
         }
 
         // 3. Binarización adaptativa.
+        stage?("Binarizando (umbral adaptativo Sauvola)…")
         let gray = DeepRestorer.grayArray(from: ctx)
         let window = max(25, Int(dpi / 8)) | 1
         var mask = DeepRestorer.sauvolaMask(
@@ -128,7 +138,10 @@ enum RestorationEngine {
             window: window, k: settings.strength.sauvolaK
         )
 
-        // 4. Despeckle: motas y manchas.
+        // 4. Despeckle: motas y manchas. En modo "Papel restaurado" se guarda
+        // la máscara previa para saber qué regiones eran manchas.
+        stage?("Eliminando motas y manchas…")
+        let maskBeforeDespeckle = settings.mode == .paper ? mask : []
         let unit = (dpi / 300) * (dpi / 300)
         let minSpeck = Int(6 * unit * settings.despeckleLevel * settings.strength.despeckleMultiplier)
         let protectArea = settings.protectIllustrations
@@ -148,6 +161,7 @@ enum RestorationEngine {
         // trazo). Las ilustraciones quedan fuera: conservan su ráster.
         var contoursData: Data?
         if settings.vectorizeText {
+            stage?("Vectorizando la tinta…")
             let vectorMaxArea = max(1, Int(0.01 * Double(w * h)))
             let textMask = VectorTracer.textOnlyMask(
                 mask, width: w, height: h,
@@ -162,18 +176,51 @@ enum RestorationEngine {
         }
         let inkMask = mask // máscara sin dilatar, para medir el color de tinta
 
-        // 6. Composición final (dilatación 1 px para conservar el borde
-        // antialiasado de los trazos).
-        if settings.mode != .blackWhite {
-            mask = DeepRestorer.dilated(mask, width: w, height: h)
-        }
+        // 6. Composición final.
         let inkGamma = 1.0
             + (settings.contrast - 1.0) * 2.0
             + settings.strength.extraInkGamma
-        DeepRestorer.compose(
-            in: ctx, gray: gray, mask: mask,
-            mode: settings.mode, inkGamma: inkGamma
-        )
+
+        if settings.mode == .paper {
+            // Papel restaurado: se conserva el papel aplanado (textura y tono
+            // originales); las manchas (tinta detectada que el despeckle
+            // eliminó) se rellenan con papel real mediante inpainting.
+            stage?("Reconstruyendo papel (inpainting)…")
+            var stains = [UInt8](repeating: 0, count: w * h)
+            var stainCount = 0
+            if !maskBeforeDespeckle.isEmpty {
+                for i in 0..<(w * h) where maskBeforeDespeckle[i] == 1 && mask[i] == 0 {
+                    stains[i] = 1
+                    stainCount += 1
+                }
+            }
+            if stainCount > 0 {
+                // Dilatar 2 px para cubrir el halo de la mancha.
+                stains = DeepRestorer.dilated(stains, width: w, height: h)
+                stains = DeepRestorer.dilated(stains, width: w, height: h)
+                for i in 0..<(w * h) where stains[i] == 1 { stains[i] = 255 }
+                if let flat = ctx.makeImage(),
+                   let patched = Inpainter.inpaint(
+                    image: flat, holeMask: stains,
+                    radius: max(3, dpi / 60)
+                   ) {
+                    ctx.draw(patched, in: CGRect(x: 0, y: 0, width: w, height: h))
+                }
+            }
+            // Realzar solo la tinta conservada, sin tocar el papel.
+            DeepRestorer.darkenInk(in: ctx, mask: mask, inkGamma: inkGamma)
+        } else {
+            // Papel blanco puro (dilatación 1 px para conservar el borde
+            // antialiasado de los trazos).
+            stage?("Componiendo página…")
+            if settings.mode != .blackWhite {
+                mask = DeepRestorer.dilated(mask, width: w, height: h)
+            }
+            DeepRestorer.compose(
+                in: ctx, gray: gray, mask: mask,
+                mode: settings.mode, inkGamma: inkGamma
+            )
+        }
 
         // Color medio de la tinta compuesta (relleno de los vectores).
         var inkColor: InkColor?
@@ -190,6 +237,7 @@ enum RestorationEngine {
         // 7. Enfoque final (no en B/N puro: ya es binario).
         let finalImage: CGImage
         if settings.sharpness > 0 && settings.mode != .blackWhite {
+            stage?("Enfocando…")
             finalImage = try sharpened(composed, settings: settings, dpi: dpi)
         } else {
             finalImage = composed
@@ -236,7 +284,7 @@ enum RestorationEngine {
         color.inputImage = image
         color.contrast = Float(settings.contrast)
         color.brightness = 0
-        color.saturation = settings.mode == .color ? 1.0 : 0.0
+        color.saturation = (settings.mode == .color || settings.mode == .paper) ? 1.0 : 0.0
         image = color.outputImage ?? image
 
         if settings.sharpness > 0 {
