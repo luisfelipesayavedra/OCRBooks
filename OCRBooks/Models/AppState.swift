@@ -16,10 +16,50 @@ final class AppState: ObservableObject {
     @Published var progressLabel = ""
     @Published var errorMessage: String?
     @Published var documentURL: URL?
+    @Published var srState: SRState = .notDownloaded
+
+    let superRes = SuperResolution()
 
     private var pdf: PDFDocument?
     private var cacheDir: URL?
     private var batchTask: Task<Void, Never>?
+
+    init() {
+        // Si el modelo de IA ya está compilado en disco, cargarlo sin red.
+        if superRes.loadIfCached(variant: settings.aiVariant) {
+            srState = .ready
+        }
+    }
+
+    // MARK: - Modelo de IA (Real-ESRGAN)
+
+    /// Descarga/compila/carga la variante elegida del modelo.
+    func prepareAIModel() {
+        let variant = settings.aiVariant
+        srState = .downloading
+        Task.detached(priority: .userInitiated) { [superRes, weak self] in
+            await superRes.prepare(variant: variant) { state in
+                Task { @MainActor [weak self] in
+                    self?.srState = state
+                    if case .failed = state {
+                        self?.settings.aiReconstruction = false
+                    }
+                }
+            }
+        }
+    }
+
+    /// Al cambiar de variante en el panel: usar la caché si existe.
+    func aiVariantChanged() {
+        if superRes.loadedVariant == settings.aiVariant, superRes.isReady {
+            srState = .ready
+        } else if superRes.loadIfCached(variant: settings.aiVariant) {
+            srState = .ready
+        } else {
+            srState = .notDownloaded
+            settings.aiReconstruction = false
+        }
+    }
 
     var hasDocument: Bool { pdf != nil }
 
@@ -139,15 +179,30 @@ final class AppState: ObservableObject {
             : "Reconstrucción profunda a \(Int(currentSettings.dpi)) ppp…"
         pages[index].status = .processing(stepLabel)
 
-        let result: Result<ProcessedPage, Error> = await Task.detached(priority: .userInitiated) {
+        let resolver: SuperResolution? =
+            (currentSettings.aiReconstruction && superRes.isReady) ? superRes : nil
+
+        let result: Result<ProcessedPage, Error> = await Task.detached(priority: .userInitiated) { [weak self] in
             do {
                 let original = try PDFRenderer.render(page: page, dpi: currentSettings.dpi)
 
                 let angle = currentSettings.deskew ? SkewDetector.detectAngle(in: original) : 0
+                var lastShown = -1
                 let output = try RestorationEngine.enhance(
                     original,
                     skewAngle: angle,
-                    settings: currentSettings
+                    settings: currentSettings,
+                    superResolver: resolver,
+                    srProgress: { fraction in
+                        let percent = Int(fraction * 100)
+                        guard percent != lastShown, percent % 2 == 0 else { return }
+                        lastShown = percent
+                        Task { @MainActor [weak self] in
+                            guard let self, self.pages.indices.contains(index),
+                                  case .processing = self.pages[index].status else { return }
+                            self.pages[index].status = .processing("IA reconstruyendo trazos… \(percent) %")
+                        }
+                    }
                 )
                 let enhanced = output.image
 
@@ -178,7 +233,8 @@ final class AppState: ObservableObject {
                     lines: lines,
                     skewAngle: angle,
                     contoursURL: contoursURL,
-                    inkColor: output.inkColor
+                    inkColor: output.inkColor,
+                    renderDPI: currentSettings.dpi * output.scaleFactor
                 )
                 return .success(processed)
             } catch {
@@ -197,6 +253,7 @@ final class AppState: ObservableObject {
             pages[index].strokes = [] // la imagen cambió: los trazos antiguos ya no aplican
             pages[index].contoursURL = processed.contoursURL
             pages[index].inkColor = processed.inkColor
+            pages[index].renderDPI = processed.renderDPI
             pages[index].status = .done
         case .failure(let error):
             pages[index].status = .failed(error.localizedDescription)
@@ -260,7 +317,8 @@ final class AppState: ObservableObject {
                 return
             }
 
-            let (exportPages, dpi): ([PDFExporter.ExportPage], Double) = await MainActor.run {
+            let exportPages: [PDFExporter.ExportPage] = await MainActor.run {
+                let fallbackDPI = self.settings.dpi
                 let items = self.pages.compactMap { page -> PDFExporter.ExportPage? in
                     guard let imageURL = page.enhancedURL else { return nil }
                     return PDFExporter.ExportPage(
@@ -269,16 +327,17 @@ final class AppState: ObservableObject {
                         lines: page.lines,
                         strokes: page.strokes,
                         contoursURL: page.contoursURL,
-                        inkColor: page.inkColor
+                        inkColor: page.inkColor,
+                        dpi: page.renderDPI > 0 ? page.renderDPI : fallbackDPI
                     )
                 }
                 self.progressLabel = "Escribiendo PDF…"
-                return (items, self.settings.dpi)
+                return items
             }
 
             do {
                 try await Task.detached(priority: .userInitiated) {
-                    try PDFExporter.export(pages: exportPages, dpi: dpi, to: url)
+                    try PDFExporter.export(pages: exportPages, to: url)
                 }.value
                 await MainActor.run {
                     self.progress = 1
@@ -304,4 +363,5 @@ private struct ProcessedPage {
     let skewAngle: Double
     let contoursURL: URL?
     let inkColor: InkColor?
+    let renderDPI: Double
 }

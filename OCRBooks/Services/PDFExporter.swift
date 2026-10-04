@@ -28,9 +28,12 @@ enum PDFExporter {
         let strokes: [EraserStroke]
         let contoursURL: URL?
         let inkColor: InkColor?
+        /// DPI real de la imagen de esta página (con IA puede diferir entre
+        /// páginas): determina su tamaño físico en el PDF.
+        let dpi: Double
     }
 
-    static func export(pages: [ExportPage], dpi: Double, to url: URL) throws {
+    static func export(pages: [ExportPage], to url: URL) throws {
         guard let ctx = CGContext(url as CFURL, mediaBox: nil, nil) else {
             throw PDFExporterError.contextCreationFailed
         }
@@ -42,8 +45,8 @@ enum PDFExporter {
                 }
 
                 // Tamaño físico en puntos: se conserva el tamaño real del libro.
-                let widthPt = CGFloat(image.width) / CGFloat(dpi) * 72.0
-                let heightPt = CGFloat(image.height) / CGFloat(dpi) * 72.0
+                let widthPt = CGFloat(image.width) / CGFloat(page.dpi) * 72.0
+                let heightPt = CGFloat(image.height) / CGFloat(page.dpi) * 72.0
                 var mediaBox = CGRect(x: 0, y: 0, width: widthPt, height: heightPt)
 
                 let boxData = Data(bytes: &mediaBox, count: MemoryLayout<CGRect>.size)
@@ -61,7 +64,7 @@ enum PDFExporter {
                    let data = try? Data(contentsOf: contoursURL),
                    let loops = VectorTracer.decode(data),
                    !loops.isEmpty {
-                    let scale = 72.0 / CGFloat(dpi)
+                    let scale = 72.0 / CGFloat(page.dpi)
                     let path = VectorTracer.smoothPath(loops: loops) { point in
                         // Píxeles (fila 0 arriba) → puntos PDF (origen abajo).
                         CGPoint(x: point.x * scale, y: heightPt - point.y * scale)
@@ -79,7 +82,7 @@ enum PDFExporter {
                 // Trazos del borrador manual, como vectores blancos encima de
                 // la imagen (misma orientación que el canvas del editor).
                 if !page.strokes.isEmpty {
-                    let scale = 72.0 / CGFloat(dpi)
+                    let scale = 72.0 / CGFloat(page.dpi)
                     drawEraserStrokes(page.strokes, in: ctx, scale: scale)
                 }
 

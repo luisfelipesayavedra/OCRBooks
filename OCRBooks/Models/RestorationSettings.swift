@@ -122,6 +122,14 @@ struct RestorationSettings: Equatable, Codable {
     /// capitulares) aunque la limpieza de manchas esté activa.
     var protectIllustrations: Bool = true
 
+    /// Reconstrucción IA (Real-ESRGAN ×4 por Core ML, 100 % local): repara
+    /// trazos dañados o borrosos y dobla la resolución efectiva de la página
+    /// antes de la binarización. Requiere descargar el modelo (~30 MB) una vez.
+    var aiReconstruction: Bool = false
+
+    /// Variante del modelo de IA.
+    var aiVariant: SRVariant = .x4plus
+
     /// Recomposición vectorial de la tinta: los contornos reales de las letras
     /// se trazan como curvas Bézier y se incrustan en el PDF exportado, de
     /// modo que el texto queda perfectamente nítido a cualquier zoom e

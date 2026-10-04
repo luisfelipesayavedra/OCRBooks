@@ -57,6 +57,9 @@ struct PageItem: Identifiable {
     var strokes: [EraserStroke] = [] // borrador manual
     var contoursURL: URL? // contornos vectoriales de la tinta (.vec en disco)
     var inkColor: InkColor?
+    /// DPI real de la imagen restaurada (puede ser el doble del ajuste cuando
+    /// actuó la reconstrucción IA). 0 = aún sin procesar.
+    var renderDPI: Double = 0
 
     var text: String {
         lines.map(\.text).joined(separator: "\n")

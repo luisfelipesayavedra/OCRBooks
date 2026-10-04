@@ -10,6 +10,7 @@ Para cada página del PDF (modo **Profundo**/**Máximo**, el predeterminado):
 
 1. **Reconstrucción a alta resolución** — la página se vuelve a renderizar desde el PDF original a 300/400/600/800 ppp. Nunca se re-escala una imagen ya degradada, por eso se recupera resolución y definición reales.
 2. **Enderezado (deskew)** — detecta la inclinación del escaneo por perfil de proyección (±3°, pasos de 0,25°) y la corrige, alineando las líneas de texto.
+2.5 **Reconstrucción IA (opcional)** — Real-ESRGAN ×4 ejecutado 100 % en el Mac vía Core ML (Neural Engine/GPU): repara trazos dañados o borrosos y dobla la resolución efectiva de la página antes de la binarización. Procesa por mosaicos de 256 px con solapamiento (sin costuras). Dos modelos descargables (~30 MB, una sola vez, licencia BSD-3): *x4plus* (máxima calidad) y *x4v3-denoise* (rápido y antirruido).
 3. **Aplanado de iluminación en CPU** — estima el fondo (papel) por bloques y normaliza cada píxel contra él: desaparecen sombras de encuadernación, manchas de luz y amarilleo irregular. El papel queda blanco puro.
 4. **Binarización adaptativa de Sauvola** — el umbral tinta/papel se calcula localmente alrededor de cada píxel (el equivalente a decidir palabra por palabra qué trazos son reales), lo que rescata tinta desvaída que un umbral global perdería.
 5. **Eliminación de manchas y motas** — análisis de componentes conexas: cada mota, punto o mancha del escaneo se identifica como grupo de píxeles y se elimina según su tamaño; una pasada previa de OCR delimita las zonas de texto y **todo lo que queda fuera de ellas se borra** (con protección opcional para ilustraciones, grabados y capitulares).
@@ -66,6 +67,7 @@ OCRBooks/
 │   ├── RestorationEngine.swift  # Orquestación suave (CI) / profunda (CPU)
 │   ├── DeepRestorer.swift       # Aplanado, Sauvola, despeckle, composición
 │   ├── VectorTracer.swift       # Vectorización de la tinta (potrace-lite)
+│   ├── SuperResolution.swift    # Real-ESRGAN ×4 por Core ML (mosaicos)
 │   ├── OCRService.swift         # Vision (VNRecognizeTextRequest, .accurate)
 │   ├── PDFExporter.swift        # PDF con texto invisible + trazos de borrador
 │   └── ImageUtil.swift          # Escalado y PNG sin pérdida

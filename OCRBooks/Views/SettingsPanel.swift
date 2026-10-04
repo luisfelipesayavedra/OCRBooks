@@ -16,6 +16,49 @@ struct SettingsPanel: View {
                 .pickerStyle(.radioGroup)
             }
 
+            Section("Reconstrucción IA (Real-ESRGAN)") {
+                Picker("Modelo", selection: $state.settings.aiVariant) {
+                    ForEach(SRVariant.allCases) { variant in
+                        Text(variant.label).tag(variant)
+                    }
+                }
+                .disabled(state.srState == .downloading || state.srState == .compiling)
+                .onChange(of: state.settings.aiVariant) { _ in
+                    state.aiVariantChanged()
+                }
+
+                switch state.srState {
+                case .notDownloaded:
+                    Button {
+                        state.prepareAIModel()
+                    } label: {
+                        Label("Descargar modelo (~30 MB, una sola vez)", systemImage: "arrow.down.circle")
+                    }
+                case .downloading:
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Descargando modelo…").foregroundStyle(.secondary)
+                    }
+                case .compiling:
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Compilando para tu Mac…").foregroundStyle(.secondary)
+                    }
+                case .ready:
+                    Toggle("Reparar trazos con IA (lento)", isOn: $state.settings.aiReconstruction)
+                        .help("Real-ESRGAN ×4 por Core ML, 100 % local: reconstruye trazos dañados o borrosos y dobla la resolución efectiva antes de la binarización. Minutos por página según el Mac.")
+                case .failed(let message):
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Error: \(message)")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                        Button("Reintentar descarga") {
+                            state.prepareAIModel()
+                        }
+                    }
+                }
+            }
+
             Section("Reconstrucción") {
                 Picker("Resolución", selection: $state.settings.dpi) {
                     Text("300 ppp").tag(300.0)

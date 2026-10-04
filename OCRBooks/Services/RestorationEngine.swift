@@ -6,45 +6,47 @@ enum RestorationEngineError: Error {
     case renderFailed
 }
 
-/// Motor de restauración. Dos caminos:
-///
-/// **Suave** — cadena Core Image ligera (realce sin reconstrucción).
-///
-/// **Profunda / Máxima** — reconstrucción real de la página:
-/// 1. Deskew + reducción de ruido (Core Image).
-/// 2. Aplanado de iluminación en CPU (papel blanco uniforme).
-/// 3. Pasada previa de OCR para localizar las zonas de texto.
-/// 4. Binarización adaptativa Sauvola (umbral local, palabra por palabra).
-/// 5. Despeckle por componentes conexas: motas fuera siempre; manchas fuera
-///    del texto fuera (con protección opcional de ilustraciones).
-/// 6. Composición: papel blanco puro, tinta con el detalle del trazo original.
-/// 7. Máscara de enfoque final.
 /// Resultado de la restauración: imagen final más, si se pidió, la
 /// recomposición vectorial de la tinta (contornos serializados y color).
+/// `scaleFactor` indica cuánto creció la resolución respecto al render
+/// original (2 cuando actuó la reconstrucción IA): el DPI efectivo de la
+/// página es `settings.dpi * scaleFactor`.
 struct EnhanceOutput {
     let image: CGImage
     let contoursData: Data?
     let inkColor: InkColor?
+    let scaleFactor: Double
 }
 
+/// Motor de restauración. Flujo:
+///
+/// **Pre-proceso común** — deskew + reducción de ruido (Core Image) y, si está
+/// activa, **reconstrucción IA** (Real-ESRGAN ×4 integrado a ×2: dobla la
+/// resolución efectiva reparando trazos dañados).
+///
+/// **Suave** — cadena Core Image ligera (realce sin reconstrucción).
+///
+/// **Profunda / Máxima** — reconstrucción real de la página:
+/// 1. Aplanado de iluminación en CPU (papel blanco uniforme).
+/// 2. Pasada previa de OCR para localizar las zonas de texto.
+/// 3. Binarización adaptativa Sauvola (umbral local, palabra por palabra).
+/// 4. Despeckle por componentes conexas (motas y manchas).
+/// 5. Recomposición vectorial de la tinta (opcional).
+/// 6. Composición: papel blanco puro, tinta con el detalle del trazo original.
+/// 7. Máscara de enfoque final.
 enum RestorationEngine {
 
     private static let context = CIContext(options: [.cacheIntermediates: false])
 
-    static func enhance(_ input: CGImage, skewAngle: Double, settings: RestorationSettings) throws -> EnhanceOutput {
-        switch settings.strength {
-        case .light:
-            let image = try lightEnhance(input, skewAngle: skewAngle, settings: settings)
-            return EnhanceOutput(image: image, contoursData: nil, inkColor: nil)
-        case .deep, .maximum:
-            return try deepEnhance(input, skewAngle: skewAngle, settings: settings)
-        }
-    }
+    static func enhance(
+        _ input: CGImage,
+        skewAngle: Double,
+        settings: RestorationSettings,
+        superResolver: SuperResolution? = nil,
+        srProgress: ((Double) -> Void)? = nil
+    ) throws -> EnhanceOutput {
 
-    // MARK: - Camino profundo
-
-    private static func deepEnhance(_ input: CGImage, skewAngle: Double, settings: RestorationSettings) throws -> EnhanceOutput {
-        // 1. Deskew + ruido con Core Image.
+        // Pre-proceso común: deskew + ruido.
         var ci = CIImage(cgImage: input)
         let extent = ci.extent
         if settings.deskew, abs(skewAngle) >= SkewDetector.step / 2 {
@@ -58,26 +60,54 @@ enum RestorationEngine {
             ci = noise.outputImage ?? ci
         }
         ci = ci.cropped(to: extent)
-        guard let base = context.createCGImage(ci, from: ci.extent) else {
+        guard var base = context.createCGImage(ci, from: ci.extent) else {
             throw RestorationEngineError.renderFailed
         }
 
+        // Reconstrucción IA (opcional): trazos reparados y resolución ×2.
+        var scaleFactor = 1.0
+        if settings.aiReconstruction, let sr = superResolver, sr.isReady {
+            base = try sr.reconstruct(base, progress: srProgress)
+            scaleFactor = Double(SuperResolution.outputScale)
+        }
+        let effectiveDPI = settings.dpi * scaleFactor
+
+        switch settings.strength {
+        case .light:
+            let image = try lightEnhance(base, settings: settings, dpi: effectiveDPI)
+            return EnhanceOutput(
+                image: image, contoursData: nil, inkColor: nil,
+                scaleFactor: scaleFactor
+            )
+        case .deep, .maximum:
+            return try deepEnhance(base, settings: settings, dpi: effectiveDPI, scaleFactor: scaleFactor)
+        }
+    }
+
+    // MARK: - Camino profundo
+
+    private static func deepEnhance(
+        _ base: CGImage,
+        settings: RestorationSettings,
+        dpi: Double,
+        scaleFactor: Double
+    ) throws -> EnhanceOutput {
         let w = base.width
         let h = base.height
         let ctx = try DeepRestorer.rgbaContext(from: base)
 
-        // 2. Aplanado de iluminación (siempre en el camino profundo: es la
+        // 1. Aplanado de iluminación (siempre en el camino profundo: es la
         // base para que Sauvola y el despeckle funcionen bien).
-        DeepRestorer.flattenIllumination(in: ctx, dpi: settings.dpi)
+        DeepRestorer.flattenIllumination(in: ctx, dpi: dpi)
 
-        // 3. Pasada previa de OCR sobre la imagen aplanada: las cajas de texto
+        // 2. Pasada previa de OCR sobre la imagen aplanada: las cajas de texto
         // guían la eliminación de manchas.
         var keepRects: [CGRect] = []
         if settings.removeStainsOutsideText, let flat = ctx.makeImage() {
             let lines = (try? OCRService.recognize(
                 in: flat, languages: settings.recognitionLanguages
             )) ?? []
-            let margin = CGFloat(max(6, Int(settings.dpi / 40)))
+            let margin = CGFloat(max(6, Int(dpi / 40)))
             keepRects = lines.map { line in
                 // Vision: origen abajo-izquierda normalizado → píxeles con
                 // fila 0 arriba (sistema de los buffers de DeepRestorer).
@@ -90,16 +120,16 @@ enum RestorationEngine {
             }
         }
 
-        // 4. Binarización adaptativa.
+        // 3. Binarización adaptativa.
         let gray = DeepRestorer.grayArray(from: ctx)
-        let window = max(25, Int(settings.dpi / 8)) | 1
+        let window = max(25, Int(dpi / 8)) | 1
         var mask = DeepRestorer.sauvolaMask(
             gray: gray, width: w, height: h,
             window: window, k: settings.strength.sauvolaK
         )
 
-        // 5. Despeckle: motas y manchas.
-        let unit = (settings.dpi / 300) * (settings.dpi / 300)
+        // 4. Despeckle: motas y manchas.
+        let unit = (dpi / 300) * (dpi / 300)
         let minSpeck = Int(6 * unit * settings.despeckleLevel * settings.strength.despeckleMultiplier)
         let protectArea = settings.protectIllustrations
             ? max(1, Int(0.003 * Double(w * h)))
@@ -113,7 +143,7 @@ enum RestorationEngine {
             protectArea: protectArea
         )
 
-        // 6. Recomposición vectorial: se trazan los contornos reales de los
+        // 5. Recomposición vectorial: se trazan los contornos reales de los
         // glifos (antes de dilatar la máscara, que es la forma verdadera del
         // trazo). Las ilustraciones quedan fuera: conservan su ráster.
         var contoursData: Data?
@@ -132,7 +162,7 @@ enum RestorationEngine {
         }
         let inkMask = mask // máscara sin dilatar, para medir el color de tinta
 
-        // 7. Composición final (dilatación 1 px para conservar el borde
+        // 6. Composición final (dilatación 1 px para conservar el borde
         // antialiasado de los trazos).
         if settings.mode != .blackWhite {
             mask = DeepRestorer.dilated(mask, width: w, height: h)
@@ -157,21 +187,24 @@ enum RestorationEngine {
             throw RestorationEngineError.renderFailed
         }
 
-        // 8. Enfoque final (no en B/N puro: ya es binario).
+        // 7. Enfoque final (no en B/N puro: ya es binario).
         let finalImage: CGImage
         if settings.sharpness > 0 && settings.mode != .blackWhite {
-            finalImage = try sharpened(composed, settings: settings)
+            finalImage = try sharpened(composed, settings: settings, dpi: dpi)
         } else {
             finalImage = composed
         }
-        return EnhanceOutput(image: finalImage, contoursData: contoursData, inkColor: inkColor)
+        return EnhanceOutput(
+            image: finalImage, contoursData: contoursData, inkColor: inkColor,
+            scaleFactor: scaleFactor
+        )
     }
 
-    private static func sharpened(_ image: CGImage, settings: RestorationSettings) throws -> CGImage {
+    private static func sharpened(_ image: CGImage, settings: RestorationSettings, dpi: Double) throws -> CGImage {
         var ci = CIImage(cgImage: image)
         let unsharp = CIFilter.unsharpMask()
         unsharp.inputImage = ci
-        unsharp.radius = Float(max(1.5, settings.dpi / 160.0))
+        unsharp.radius = Float(max(1.5, dpi / 160.0))
         unsharp.intensity = Float(settings.sharpness)
         ci = (unsharp.outputImage ?? ci).cropped(to: ci.extent)
         guard let out = context.createCGImage(ci, from: ci.extent) else {
@@ -182,24 +215,12 @@ enum RestorationEngine {
 
     // MARK: - Camino suave (realce Core Image)
 
-    private static func lightEnhance(_ input: CGImage, skewAngle: Double, settings: RestorationSettings) throws -> CGImage {
-        var image = CIImage(cgImage: input)
+    private static func lightEnhance(_ base: CGImage, settings: RestorationSettings, dpi: Double) throws -> CGImage {
+        var image = CIImage(cgImage: base)
         let extent = image.extent
 
-        if settings.deskew, abs(skewAngle) >= SkewDetector.step / 2 {
-            image = desheared(image, bitmapAngleDegrees: skewAngle)
-        }
-
-        if settings.noiseReduction > 0 {
-            let noise = CIFilter.noiseReduction()
-            noise.inputImage = image
-            noise.noiseLevel = Float(settings.noiseReduction)
-            noise.sharpness = 0.6
-            image = noise.outputImage ?? image
-        }
-
         if settings.flattenBackground {
-            let sigma = max(20.0, settings.dpi / 8.0)
+            let sigma = max(20.0, dpi / 8.0)
             let blurred = image
                 .clampedToExtent()
                 .applyingGaussianBlur(sigma: sigma)
@@ -221,7 +242,7 @@ enum RestorationEngine {
         if settings.sharpness > 0 {
             let unsharp = CIFilter.unsharpMask()
             unsharp.inputImage = image
-            unsharp.radius = Float(max(1.5, settings.dpi / 160.0))
+            unsharp.radius = Float(max(1.5, dpi / 160.0))
             unsharp.intensity = Float(settings.sharpness)
             image = unsharp.outputImage ?? image
         }
