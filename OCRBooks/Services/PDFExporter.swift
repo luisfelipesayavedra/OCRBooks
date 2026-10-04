@@ -26,6 +26,8 @@ enum PDFExporter {
         let imageURL: URL
         let lines: [RecognizedLine]
         let strokes: [EraserStroke]
+        let contoursURL: URL?
+        let inkColor: InkColor?
     }
 
     static func export(pages: [ExportPage], dpi: Double, to url: URL) throws {
@@ -50,6 +52,29 @@ enum PDFExporter {
 
                 ctx.interpolationQuality = .high
                 ctx.draw(image, in: mediaBox)
+
+                // Recomposición vectorial: los contornos reales de las letras
+                // se rellenan como curvas Bézier sobre su propio ráster, de
+                // modo que el texto queda nítido a cualquier zoom e impresión
+                // (las ilustraciones conservan el ráster de debajo).
+                if let contoursURL = page.contoursURL,
+                   let data = try? Data(contentsOf: contoursURL),
+                   let loops = VectorTracer.decode(data),
+                   !loops.isEmpty {
+                    let scale = 72.0 / CGFloat(dpi)
+                    let path = VectorTracer.smoothPath(loops: loops) { point in
+                        // Píxeles (fila 0 arriba) → puntos PDF (origen abajo).
+                        CGPoint(x: point.x * scale, y: heightPt - point.y * scale)
+                    }
+                    let ink = page.inkColor ?? InkColor(r: 0.08, g: 0.08, b: 0.08)
+                    ctx.saveGState()
+                    ctx.setFillColor(CGColor(
+                        red: ink.r, green: ink.g, blue: ink.b, alpha: 1
+                    ))
+                    ctx.addPath(path)
+                    ctx.fillPath(using: .evenOdd)
+                    ctx.restoreGState()
+                }
 
                 // Trazos del borrador manual, como vectores blancos encima de
                 // la imagen (misma orientación que el canvas del editor).

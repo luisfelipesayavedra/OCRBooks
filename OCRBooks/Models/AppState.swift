@@ -144,11 +144,12 @@ final class AppState: ObservableObject {
                 let original = try PDFRenderer.render(page: page, dpi: currentSettings.dpi)
 
                 let angle = currentSettings.deskew ? SkewDetector.detectAngle(in: original) : 0
-                let enhanced = try RestorationEngine.enhance(
+                let output = try RestorationEngine.enhance(
                     original,
                     skewAngle: angle,
                     settings: currentSettings
                 )
+                let enhanced = output.image
 
                 let lines = try OCRService.recognize(
                     in: enhanced,
@@ -160,12 +161,24 @@ final class AppState: ObservableObject {
                 )
                 try ImageUtil.writePNG(enhanced, to: fileURL)
 
+                // Contornos vectoriales de la tinta, serializados en disco.
+                var contoursURL: URL?
+                if let data = output.contoursData {
+                    let vecURL = cacheDir.appendingPathComponent(
+                        String(format: "page-%04d.vec", index)
+                    )
+                    try data.write(to: vecURL)
+                    contoursURL = vecURL
+                }
+
                 let processed = ProcessedPage(
                     originalPreview: ImageUtil.scaled(original, maxDimension: 1800),
                     enhancedPreview: ImageUtil.scaled(enhanced, maxDimension: 1800),
                     enhancedURL: fileURL,
                     lines: lines,
-                    skewAngle: angle
+                    skewAngle: angle,
+                    contoursURL: contoursURL,
+                    inkColor: output.inkColor
                 )
                 return .success(processed)
             } catch {
@@ -182,6 +195,8 @@ final class AppState: ObservableObject {
             pages[index].lines = processed.lines
             pages[index].skewAngle = processed.skewAngle
             pages[index].strokes = [] // la imagen cambió: los trazos antiguos ya no aplican
+            pages[index].contoursURL = processed.contoursURL
+            pages[index].inkColor = processed.inkColor
             pages[index].status = .done
         case .failure(let error):
             pages[index].status = .failed(error.localizedDescription)
@@ -252,7 +267,9 @@ final class AppState: ObservableObject {
                         index: page.id,
                         imageURL: imageURL,
                         lines: page.lines,
-                        strokes: page.strokes
+                        strokes: page.strokes,
+                        contoursURL: page.contoursURL,
+                        inkColor: page.inkColor
                     )
                 }
                 self.progressLabel = "Escribiendo PDF…"
@@ -285,4 +302,6 @@ private struct ProcessedPage {
     let enhancedURL: URL
     let lines: [RecognizedLine]
     let skewAngle: Double
+    let contoursURL: URL?
+    let inkColor: InkColor?
 }

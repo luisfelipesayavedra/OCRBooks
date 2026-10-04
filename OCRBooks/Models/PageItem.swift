@@ -23,6 +23,14 @@ struct RecognizedLine: Codable, Equatable {
     let bbox: CGRect
 }
 
+/// Color medio de la tinta de una página, usado para rellenar los contornos
+/// vectoriales con el mismo tono que el trazo impreso.
+struct InkColor: Codable, Equatable {
+    var r: Double
+    var g: Double
+    var b: Double
+}
+
 /// Un trazo del borrador manual, en coordenadas de píxel de la imagen
 /// restaurada (origen abajo-izquierda, como CoreGraphics y PDF). Se aplica
 /// como pintura blanca con extremos redondeados, tanto en pantalla como al
@@ -47,6 +55,8 @@ struct PageItem: Identifiable {
     var lines: [RecognizedLine] = []
     var skewAngle: Double = 0
     var strokes: [EraserStroke] = [] // borrador manual
+    var contoursURL: URL? // contornos vectoriales de la tinta (.vec en disco)
+    var inkColor: InkColor?
 
     var text: String {
         lines.map(\.text).joined(separator: "\n")

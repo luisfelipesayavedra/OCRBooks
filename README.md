@@ -15,8 +15,9 @@ Para cada página del PDF (modo **Profundo**/**Máximo**, el predeterminado):
 5. **Eliminación de manchas y motas** — análisis de componentes conexas: cada mota, punto o mancha del escaneo se identifica como grupo de píxeles y se elimina según su tamaño; una pasada previa de OCR delimita las zonas de texto y **todo lo que queda fuera de ellas se borra** (con protección opcional para ilustraciones, grabados y capitulares).
 6. **Composición y nitidez** — papel 100 % blanco; la tinta conserva el detalle del trazo original con densidad ajustable, más máscara de enfoque final. Tres modos: color restaurado, escala de grises o blanco y negro puro.
 7. **OCR con Vision de Apple** — segunda pasada de reconocimiento en modo preciso sobre la página ya restaurada (español, inglés, francés, italiano, portugués, alemán).
-8. **Borrador manual** — para lo que el algoritmo no pueda decidir: pinta de blanco cualquier marca restante directamente sobre la página, con tamaño de pincel ajustable y deshacer. Los trazos se aplican también al PDF exportado.
-9. **Exportación** — PDF final con la imagen restaurada de cada página más una **capa de texto invisible perfectamente alineada**: el libro conserva su estética original pero se puede buscar, seleccionar y copiar.
+8. **Recomposición vectorial de la tinta** — los contornos reales de cada letra se trazan como curvas Bézier (marching squares → Douglas-Peucker → suavizado con detección de esquinas, estilo *potrace*) y se incrustan en el PDF: el texto queda **perfectamente nítido a cualquier zoom e impresión**, conservando la tipografía original del libro. Las ilustraciones y grabados permanecen en ráster, donde conservan su tramado.
+9. **Borrador manual** — para lo que el algoritmo no pueda decidir: pinta de blanco cualquier marca restante directamente sobre la página, con tamaño de pincel ajustable y deshacer. Los trazos se aplican también al PDF exportado.
+10. **Exportación** — PDF final con la imagen restaurada de cada página, la capa vectorial de tinta encima y una **capa de texto invisible perfectamente alineada**: el libro conserva su estética original pero se puede buscar, seleccionar y copiar.
 
 El modo **Suave** conserva la cadena ligera de realce (Core Image) para quien solo quiera mejorar contraste y nitidez sin reconstruir la página.
 
@@ -63,6 +64,7 @@ OCRBooks/
 │   ├── SkewDetector.swift       # Detección de inclinación (proyección)
 │   ├── RestorationEngine.swift  # Orquestación suave (CI) / profunda (CPU)
 │   ├── DeepRestorer.swift       # Aplanado, Sauvola, despeckle, composición
+│   ├── VectorTracer.swift       # Vectorización de la tinta (potrace-lite)
 │   ├── OCRService.swift         # Vision (VNRecognizeTextRequest, .accurate)
 │   ├── PDFExporter.swift        # PDF con texto invisible + trazos de borrador
 │   └── ImageUtil.swift          # Escalado y PNG sin pérdida

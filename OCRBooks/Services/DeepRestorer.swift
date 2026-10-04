@@ -302,6 +302,33 @@ enum DeepRestorer {
         return out
     }
 
+    /// Color medio de la tinta ya compuesta (para rellenar los contornos
+    /// vectoriales con el mismo tono que el trazo impreso).
+    static func averageInkColor(in ctx: CGContext, mask: [UInt8]) -> InkColor {
+        guard let data = ctx.data else { return InkColor(r: 0.08, g: 0.08, b: 0.08) }
+        let w = ctx.width, h = ctx.height, bpr = ctx.bytesPerRow
+        let px = data.bindMemory(to: UInt8.self, capacity: bpr * h)
+        var sums = (r: 0.0, g: 0.0, b: 0.0)
+        var count = 0.0
+        for y in 0..<h {
+            let row = y * bpr
+            let grow = y * w
+            for x in 0..<w where mask[grow + x] == 1 {
+                let o = row + x * 4
+                sums.r += Double(px[o])
+                sums.g += Double(px[o + 1])
+                sums.b += Double(px[o + 2])
+                count += 1
+            }
+        }
+        guard count > 0 else { return InkColor(r: 0.08, g: 0.08, b: 0.08) }
+        return InkColor(
+            r: sums.r / count / 255,
+            g: sums.g / count / 255,
+            b: sums.b / count / 255
+        )
+    }
+
     // MARK: - Composición final
 
     /// Escribe el resultado sobre el contexto: papel blanco puro y tinta con

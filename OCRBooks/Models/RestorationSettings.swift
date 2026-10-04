@@ -122,6 +122,13 @@ struct RestorationSettings: Equatable, Codable {
     /// capitulares) aunque la limpieza de manchas esté activa.
     var protectIllustrations: Bool = true
 
+    /// Recomposición vectorial de la tinta: los contornos reales de las letras
+    /// se trazan como curvas Bézier y se incrustan en el PDF exportado, de
+    /// modo que el texto queda perfectamente nítido a cualquier zoom e
+    /// impresión conservando la tipografía original del libro.
+    /// Solo disponible en los modos profundo/máximo.
+    var vectorizeText: Bool = true
+
     /// Modo de salida.
     var mode: OutputMode = .grayscale
 

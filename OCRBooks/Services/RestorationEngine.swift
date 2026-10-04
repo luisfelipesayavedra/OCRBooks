@@ -19,14 +19,23 @@ enum RestorationEngineError: Error {
 ///    del texto fuera (con protección opcional de ilustraciones).
 /// 6. Composición: papel blanco puro, tinta con el detalle del trazo original.
 /// 7. Máscara de enfoque final.
+/// Resultado de la restauración: imagen final más, si se pidió, la
+/// recomposición vectorial de la tinta (contornos serializados y color).
+struct EnhanceOutput {
+    let image: CGImage
+    let contoursData: Data?
+    let inkColor: InkColor?
+}
+
 enum RestorationEngine {
 
     private static let context = CIContext(options: [.cacheIntermediates: false])
 
-    static func enhance(_ input: CGImage, skewAngle: Double, settings: RestorationSettings) throws -> CGImage {
+    static func enhance(_ input: CGImage, skewAngle: Double, settings: RestorationSettings) throws -> EnhanceOutput {
         switch settings.strength {
         case .light:
-            return try lightEnhance(input, skewAngle: skewAngle, settings: settings)
+            let image = try lightEnhance(input, skewAngle: skewAngle, settings: settings)
+            return EnhanceOutput(image: image, contoursData: nil, inkColor: nil)
         case .deep, .maximum:
             return try deepEnhance(input, skewAngle: skewAngle, settings: settings)
         }
@@ -34,7 +43,7 @@ enum RestorationEngine {
 
     // MARK: - Camino profundo
 
-    private static func deepEnhance(_ input: CGImage, skewAngle: Double, settings: RestorationSettings) throws -> CGImage {
+    private static func deepEnhance(_ input: CGImage, skewAngle: Double, settings: RestorationSettings) throws -> EnhanceOutput {
         // 1. Deskew + ruido con Core Image.
         var ci = CIImage(cgImage: input)
         let extent = ci.extent
@@ -104,7 +113,26 @@ enum RestorationEngine {
             protectArea: protectArea
         )
 
-        // 6. Composición final (dilatación 1 px para conservar el borde
+        // 6. Recomposición vectorial: se trazan los contornos reales de los
+        // glifos (antes de dilatar la máscara, que es la forma verdadera del
+        // trazo). Las ilustraciones quedan fuera: conservan su ráster.
+        var contoursData: Data?
+        if settings.vectorizeText {
+            let vectorMaxArea = max(1, Int(0.01 * Double(w * h)))
+            let textMask = VectorTracer.textOnlyMask(
+                mask, width: w, height: h,
+                keepRects: keepRects, maxArea: vectorMaxArea
+            )
+            let loops = VectorTracer.traceContours(
+                mask: textMask, width: w, height: h, epsilon: 0.6
+            )
+            if !loops.isEmpty {
+                contoursData = VectorTracer.encode(loops)
+            }
+        }
+        let inkMask = mask // máscara sin dilatar, para medir el color de tinta
+
+        // 7. Composición final (dilatación 1 px para conservar el borde
         // antialiasado de los trazos).
         if settings.mode != .blackWhite {
             mask = DeepRestorer.dilated(mask, width: w, height: h)
@@ -117,15 +145,26 @@ enum RestorationEngine {
             mode: settings.mode, inkGamma: inkGamma
         )
 
+        // Color medio de la tinta compuesta (relleno de los vectores).
+        var inkColor: InkColor?
+        if contoursData != nil {
+            inkColor = settings.mode == .blackWhite
+                ? InkColor(r: 0, g: 0, b: 0)
+                : DeepRestorer.averageInkColor(in: ctx, mask: inkMask)
+        }
+
         guard let composed = ctx.makeImage() else {
             throw RestorationEngineError.renderFailed
         }
 
-        // 7. Enfoque final (no en B/N puro: ya es binario).
+        // 8. Enfoque final (no en B/N puro: ya es binario).
+        let finalImage: CGImage
         if settings.sharpness > 0 && settings.mode != .blackWhite {
-            return try sharpened(composed, settings: settings)
+            finalImage = try sharpened(composed, settings: settings)
+        } else {
+            finalImage = composed
         }
-        return composed
+        return EnhanceOutput(image: finalImage, contoursData: contoursData, inkColor: inkColor)
     }
 
     private static func sharpened(_ image: CGImage, settings: RestorationSettings) throws -> CGImage {
